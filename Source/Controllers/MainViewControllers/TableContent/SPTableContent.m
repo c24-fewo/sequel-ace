@@ -188,82 +188,66 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 - (void)awakeFromNib
 {
 	if (_mainNibLoaded) return;
+    [super awakeFromNib];
 	_mainNibLoaded = YES;
 
-	// initially hide the filter rule editor
-	[self updateFilterRuleEditorSize:0.0 animate:NO];
+    // initially hide the filter rule editor
+    [self updateFilterRuleEditorSize:0.0 animate:NO];
 
-	// Set the table content view's vertical gridlines if required
-	[tableContentView setGridStyleMask:([prefs boolForKey:SPDisplayTableViewVerticalGridlines]) ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
 
-	// Set the double-click action in blank areas of the table to create new rows
-	[tableContentView setEmptyDoubleClickAction:@selector(addRow:)];
+        // Set the table content view's vertical gridlines if required
+    [self->tableContentView setGridStyleMask:([self->prefs boolForKey:SPDisplayTableViewVerticalGridlines]) ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
 
-	[paginationViewController setTarget:self];
-	[paginationViewController setAction:@selector(navigatePaginationFromButton:)];
-	[paginationViewController view]; // make sure the nib is actually loaded
-	
-	//let's see if we can use the NSPopover (10.7+) or have to make do with our legacy clone.
-	//this is using reflection right now, as our SDK is 10.8 but our minimum supported version is 10.6
-	Class popOverClass = NSClassFromString(@"NSPopover");
-	if(popOverClass) {
-		paginationPopover = [[popOverClass alloc] init];
-		[paginationPopover setDelegate:(SPTableContent<NSPopoverDelegate> *)self];
-		[paginationPopover setContentViewController:paginationViewController];
-		[paginationPopover setBehavior:NSPopoverBehaviorTransient];
-	}
-	else {
-		[paginationBox setContentView:[paginationViewController view]];
-		
-		// Add the pagination view to the content area
-		NSRect paginationViewFrame = [paginationView frame];
-		NSRect paginationButtonFrame = [paginationButton frame];
-		paginationViewHeight = paginationViewFrame.size.height;
-		paginationViewFrame.origin.x = paginationButtonFrame.origin.x + paginationButtonFrame.size.width - paginationViewFrame.size.width;
-		paginationViewFrame.origin.y = paginationButtonFrame.origin.y + paginationButtonFrame.size.height - 2;
-		paginationViewFrame.size.height = 0;
-		[paginationView setFrame:paginationViewFrame];
-		[[paginationButton superview] addSubview:paginationView];
-	}
+    // Set the double-click action in blank areas of the table to create new rows
+    [self->tableContentView setEmptyDoubleClickAction:@selector(addRow:)];
 
-	[tableContentView setFieldEditorSelectedRange:NSMakeRange(0,0)];
+    [self->paginationViewController setTarget:self];
+    [self->paginationViewController setAction:@selector(navigatePaginationFromButton:)];
+    [self->paginationViewController view]; // make sure the nib is actually loaded
 
-	[prefs addObserver:self forKeyPath:SPDisplayTableViewVerticalGridlines options:NSKeyValueObservingOptionNew context:TableContentKVOContext];
-	[prefs addObserver:self forKeyPath:SPDisplayTableViewColumnTypes options:NSKeyValueObservingOptionNew context:TableContentKVOContext];
-	[prefs addObserver:self forKeyPath:SPGlobalFontSettings options:NSKeyValueObservingOptionNew context:TableContentKVOContext];
-	[prefs addObserver:self forKeyPath:SPDisplayBinaryDataAsHex options:NSKeyValueObservingOptionNew context:TableContentKVOContext];
+    self->paginationPopover = [[NSPopover alloc] init];
+    [self->paginationPopover setDelegate:(SPTableContent<NSPopoverDelegate> *)self];
+    [self->paginationPopover setContentViewController:self->paginationViewController];
+    [self->paginationPopover setBehavior:NSPopoverBehaviorTransient];
 
-	// Add observer to change view sizes with filter rule editor
-	[[NSNotificationCenter defaultCenter] addObserver:self
-	                                         selector:@selector(filterRuleEditorPreferredSizeChanged:)
-	                                             name:SPRuleFilterHeightChangedNotification
-	                                           object:ruleFilterController];
-	[contentAreaContainer setPostsFrameChangedNotifications:YES];
-	[[NSNotificationCenter defaultCenter] addObserver:self
-	                                         selector:@selector(contentViewSizeChanged:)
-	                                             name:NSViewFrameDidChangeNotification
-	                                           object:contentAreaContainer];
-	[ruleFilterController setTarget:self];
-	[ruleFilterController setAction:@selector(filterTable:)];
-	
-	[filterTableController setTarget:self];
-	[filterTableController setAction:@selector(filterTable:)];
-	//TODO This is only needed for 10.6 compatibility
-	scrollViewHasRubberbandScrolling = [[[ruleFilterController view] enclosingScrollView] respondsToSelector:@selector(setVerticalScrollElasticity:)];
+    [self->tableContentView setFieldEditorSelectedRange:NSMakeRange(0,0)];
 
-	// Add observers for document task activity
-	[[NSNotificationCenter defaultCenter] addObserver:self
-	                                         selector:@selector(startDocumentTaskForTab:)
-	                                             name:SPDocumentTaskStartNotification
-	                                           object:tableDocumentInstance];
-	[[NSNotificationCenter defaultCenter] addObserver:self
-	                                         selector:@selector(endDocumentTaskForTab:)
-	                                             name:SPDocumentTaskEndNotification
-	                                           object:tableDocumentInstance];
-	[[NSNotificationCenter defaultCenter] addObserver:self
-	                                         selector:@selector(documentWillClose:)
-	                                             name:SPDocumentWillCloseNotification
-	                                           object:nil];
+    [self->prefs addObserver:self forKeyPath:SPDisplayTableViewVerticalGridlines options:NSKeyValueObservingOptionNew context:TableContentKVOContext];
+    [self->prefs addObserver:self forKeyPath:SPDisplayTableViewColumnTypes options:NSKeyValueObservingOptionNew context:TableContentKVOContext];
+    [self->prefs addObserver:self forKeyPath:SPGlobalFontSettings options:NSKeyValueObservingOptionNew context:TableContentKVOContext];
+    [self->prefs addObserver:self forKeyPath:SPDisplayBinaryDataAsHex options:NSKeyValueObservingOptionNew context:TableContentKVOContext];
+
+    // Add observer to change view sizes with filter rule editor
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(filterRuleEditorPreferredSizeChanged:)
+                                                 name:SPRuleFilterHeightChangedNotification
+                                               object:self->ruleFilterController];
+    [self->contentAreaContainer setPostsFrameChangedNotifications:YES];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(contentViewSizeChanged:)
+                                                 name:NSViewFrameDidChangeNotification
+                                               object:self->contentAreaContainer];
+    [self->ruleFilterController setTarget:self];
+    [self->ruleFilterController setAction:@selector(filterTable:)];
+
+    [self->filterTableController setTarget:self];
+    [self->filterTableController setAction:@selector(filterTable:)];
+
+
+    // Add observers for document task activity
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(startDocumentTaskForTab:)
+                                                 name:SPDocumentTaskStartNotification
+                                               object:self->tableDocumentInstance];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(endDocumentTaskForTab:)
+                                                 name:SPDocumentTaskEndNotification
+                                               object:self->tableDocumentInstance];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(documentWillClose:)
+                                                 name:SPDocumentWillCloseNotification
+                                               object:nil];
+
 }
 
 #pragma mark -
@@ -657,7 +641,7 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		[toggleRuleFilterButton setState:NSControlStateValueOn];
 	}
 	else {
-		[self setRuleEditorVisible:NO animate:NO];
+		[self setRuleEditorVisible:NO animate:YES];
 		[toggleRuleFilterButton setState:NSControlStateValueOff];
 	}
 	[ruleFilterController setEnabled:enableInteraction];
@@ -1349,12 +1333,12 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	if((showFilterRuleEditor = show)) {
 		[ruleFilterController setEnabled:YES];
 		// if it was the user who enabled the filter (indicated by the animation) add an empty row by default
-		if([ruleFilterController isEmpty] && animate) {
-			[ruleFilterController addFilterExpression];
+		if([ruleFilterController isEmpty]) {
+			[[ruleFilterController onMainThread] addFilterExpression];
 			// the sizing will be updated automatically by adding a row
 		}
 		else {
-			[self updateFilterRuleEditorSize:[ruleFilterController preferredHeight] animate:animate];
+			[self updateFilterRuleEditorSize:[[ruleFilterController onMainThread] preferredHeight] animate:animate];
 		}
 	}
 	else {
@@ -3456,25 +3440,24 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 {
 	NSRect contentAreaRect = [contentAreaContainer frame];
 	CGFloat availableHeight = contentAreaRect.size.height;
-
 	NSRect ruleEditorRect = [[[ruleFilterController view] enclosingScrollView] frame];
+    ruleEditorRect.origin.x = 1;
+    ruleEditorRect.origin.y = 1;
 
 	//adjust for the UI elements below the rule editor, but only if the view should not be hidden
-	CGFloat containerRequestedHeight = showFilterRuleEditor ? requestedHeight + ruleEditorRect.origin.y : 0;
+	CGFloat containerRequestedHeight = showFilterRuleEditor ? MAX(requestedHeight, 29) + ruleEditorRect.origin.y : 0;
 
 	//the rule editor can ask for about one-third of the available space before we have it use it's scrollbar
-	CGFloat topContainerGivenHeight = MIN(containerRequestedHeight,(availableHeight / 3));
+	CGFloat topContainerGivenHeight = MAX(MIN(containerRequestedHeight,(availableHeight / 3)), 1);
 
-	// abort if the size didn't really change
 	NSRect topContainerRect = [filterRuleEditorContainer frame];
-	if(topContainerGivenHeight == topContainerRect.size.height) return;
 
 	CGFloat newBottomContainerHeight = availableHeight - topContainerGivenHeight;
 
 	NSRect bottomContainerRect = [tableContentContainer frame];
 	bottomContainerRect.size.height = newBottomContainerHeight;
 
-	topContainerRect.origin.y = newBottomContainerHeight;
+	topContainerRect.origin.y = newBottomContainerHeight - 2;
 	topContainerRect.size.height = topContainerGivenHeight;
 
 	// this one should be inferable from the IB layout IMHO, but the OS gets it wrong
@@ -3488,33 +3471,31 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		[NSAnimationContext endGrouping];
 	}
 	else {
-		[tableContentContainer setFrameSize:bottomContainerRect.size];
-		[filterRuleEditorContainer setFrame:topContainerRect];
-		[[[ruleFilterController view] enclosingScrollView] setFrame:ruleEditorRect];
+        [tableContentContainer setFrame:bottomContainerRect];
+        [filterRuleEditorContainer setFrame:topContainerRect];
+        [[[ruleFilterController view] enclosingScrollView] setFrame:ruleEditorRect];
 	}
 
 	//disable rubberband scrolling as long as there is nothing to scroll
-	if(scrollViewHasRubberbandScrolling) {
-		NSScrollView *filterControllerScroller = [[ruleFilterController view] enclosingScrollView];
-		if (ruleEditorRect.size.height >= requestedHeight) {
-			[filterControllerScroller setVerticalScrollElasticity:NSScrollElasticityNone];
-		} else {
-			[filterControllerScroller setVerticalScrollElasticity:NSScrollElasticityAutomatic];
-		}
-	}
+    NSScrollView *filterControllerScroller = [[ruleFilterController view] enclosingScrollView];
+    if (ruleEditorRect.size.height >= MAX(requestedHeight, 29)) {
+        [filterControllerScroller setVerticalScrollElasticity:NSScrollElasticityNone];
+    } else {
+        [filterControllerScroller setVerticalScrollElasticity:NSScrollElasticityAutomatic];
+    }
 }
 
 - (void)filterRuleEditorPreferredSizeChanged:(NSNotification *)notification
 {
 	if(showFilterRuleEditor) {
-		[self updateFilterRuleEditorSize:[ruleFilterController preferredHeight] animate:YES];
+		[self updateFilterRuleEditorSize:[[ruleFilterController onMainThread] preferredHeight] animate:YES];
 	}
 }
 
 - (void)contentViewSizeChanged:(NSNotification *)notification
 {
 	if(showFilterRuleEditor) {
-		[self updateFilterRuleEditorSize:[ruleFilterController preferredHeight] animate:NO];
+		[self updateFilterRuleEditorSize:[[ruleFilterController onMainThread] preferredHeight] animate:NO];
 	}
 }
 

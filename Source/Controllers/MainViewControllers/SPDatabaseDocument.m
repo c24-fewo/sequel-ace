@@ -5,7 +5,7 @@
 //  Created by Lorenz Textor (lorenz@textor.ch) on May 1, 2002.
 //  Copyright (c) 2002-2003 Lorenz Textor. All rights reserved.
 //  Copyright (c) 2012 Sequel Pro Team. All rights reserved.
-//  
+//
 //  Permission is hereby granted, free of charge, to any person
 //  obtaining a copy of this software and associated documentation
 //  files (the "Software"), to deal in the Software without
@@ -164,7 +164,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 - (instancetype)initWithWindowController:(SPWindowController *)windowController {
     if (self = [super init]) {
         _parentWindowController = windowController;
-        
+
         instanceId = atomic_fetch_add(&SPDatabaseDocumentInstanceCounter, 1);
 
         _mainNibLoaded = NO;
@@ -254,6 +254,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 - (void)awakeFromNib
 {
     if (_mainNibLoaded) return;
+    [super awakeFromNib];
 
     _mainNibLoaded = YES;
 
@@ -670,7 +671,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     if (_isWorkingLevel) databaseListIsSelectable = NO;
 
     // Select the database
-    [self selectDatabase:[chooseDatabaseButton titleOfSelectedItem] item:[self table]];
+    [self selectDatabase:[chooseDatabaseButton titleOfSelectedItem] item: nil];
 }
 
 /**
@@ -859,7 +860,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     if ([tablesListInstance hasNonTableObjects]) {
         NSAlert *alert = [[NSAlert alloc] init];
         [alert setMessageText:NSLocalizedString(@"Only Partially Supported", @"partial copy database support message")];
-        [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Duplicating the database '%@' is only partially supported as it contains objects other tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?", @"partial copy database support informative message"), selectedDatabase]];
+        [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Duplicating the database '%@' is only partially supported as it contains objects other than tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?", @"partial copy database support informative message"), selectedDatabase]];
 
         // Order of buttons matters! first button has "firstButtonReturn" return value from runModal()
         [alert addButtonWithTitle:NSLocalizedString(@"Continue", "continue button")];
@@ -883,7 +884,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 /**
  * Opens the rename database sheet and renames the databsae.
  */
-- (void)renameDatabase {	
+- (void)renameDatabase {
     if (![tablesListInstance selectionShouldChangeInTableView:nil]) {
         return;
     }
@@ -1015,7 +1016,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         }
 
         SPMainQSync(^{
-            // TODO: there have been crash reports because dbName == nil at this point. When could that happen? 
+            // TODO: there have been crash reports because dbName == nil at this point. When could that happen?
             if([dbName unboxNull]) {
                 if([dbName respondsToSelector:@selector(isEqualToString:)]) {
                     if(![dbName isEqualToString:self->selectedDatabase]) {
@@ -1230,7 +1231,9 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     // Keep the window hidden for the first ~0.5 secs
     if (timeSinceFadeInStart < 0.5) return;
 
-    [self.parentWindowControllerWindow addChildWindow:taskProgressWindow ordered:NSWindowAbove];
+    if ([taskProgressWindow parentWindow] == nil) {
+        [self.parentWindowControllerWindow addChildWindow:taskProgressWindow ordered:NSWindowAbove];
+    }
 
     CGFloat alphaValue = [taskProgressWindow alphaValue];
 
@@ -1373,7 +1376,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             [taskProgressIndicator stopAnimation:self];
         }
         [taskProgressWindow setAlphaValue:0.0f];
-        [self.parentWindowControllerWindow removeChildWindow:taskProgressWindow];
+        [taskProgressWindow orderOut:self];
         taskDisplayIsIndeterminate = YES;
         [taskProgressIndicator setIndeterminate:YES];
 
@@ -2294,7 +2297,6 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
  * Passes query to tablesListInstance
  */
 - (void)doPerformQueryService:(NSString *)query {
-    [[self.parentWindowController window] makeKeyAndOrderFront:self];
     [self viewQuery];
     [customQueryInstance doPerformQueryService:query];
 }
@@ -3259,12 +3261,12 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 
     // Backward in history menu item
     if ((action == @selector(backForwardInHistory:)) && ([menuItem tag] == 0)) {
-        return (([[spHistoryControllerInstance history] count]) && ([spHistoryControllerInstance historyPosition] > 0));
+        return ([spHistoryControllerInstance countPrevious]);
     }
 
     // Forward in history menu item
     if ((action == @selector(backForwardInHistory:)) && ([menuItem tag] == 1)) {
-        return (([[spHistoryControllerInstance history] count]) && (([spHistoryControllerInstance historyPosition] + 1) < [[spHistoryControllerInstance history] count]));
+        return [spHistoryControllerInstance countForward];
     }
 
     // Show/hide console
@@ -3820,7 +3822,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
  *  - session: Selected table and view, together with content view filter, sort, scroll position
  *  - history: query history, per-doc query favourites, and per-doc content filters
  *  - query: custom query editor content
- *	- enablecompression: large (>50k) custom query editor contents will be stored as compressed data
+ *    - enablecompression: large (>50k) custom query editor contents will be stored as compressed data
  * If none of these are supplied, nil will be returned.
  */
 - (NSDictionary *) stateIncludingDetails:(NSDictionary *)detailsToReturn
@@ -4376,7 +4378,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 #pragma mark -
 #pragma mark Scheme scripting methods
 
-/** 
+/**
  * Called by handleSchemeCommand: to break a while loop
  */
 - (void)setTimeout
@@ -4384,7 +4386,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     _workingTimeout = YES;
 }
 
-/** 
+/**
  * Process passed URL scheme command and wait (timeouted) for the document if it's busy or not yet connected
  */
 - (void)handleSchemeCommand:(NSDictionary*)commandDict
@@ -4592,7 +4594,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             if(doSyntaxHighlighting && [params count] < 3) return;
 
             BOOL changeEncoding = ![[mySQLConnection encoding] hasPrefix:@"utf8"];
-            
+
 
             NSArray *items = [params subarrayWithRange:NSMakeRange(1, [params count]-( (doSyntaxHighlighting) ? 2 : 1) )];
             NSArray *availableItems = [tablesListInstance tables];
@@ -5201,7 +5203,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 /**
  * This method *MUST* be called from the UI thread!
  */
-- (void)_renameDatabase 
+- (void)_renameDatabase
 {
     NSString *newDatabaseName = [databaseRenameNameField stringValue];
 
@@ -5376,6 +5378,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             [[chooseDatabaseButton onMainThread] selectItemWithTitle:targetDatabaseName];
 
             selectedDatabase = [[NSString alloc] initWithString:targetDatabaseName];
+            selectedTableName = targetItemName ? [[NSString alloc] initWithString:targetItemName] : nil;
 
             [databaseDataInstance resetAllData];
 
@@ -5570,18 +5573,18 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 
 //WARNING: Might be called from code in background threads
 - (void)viewStructure {
-    
+
     SPMainQSync(^{
         // Cancel the selection if currently editing a view and unable to save
         if (![self couldCommitCurrentViewActions]) {
             [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
             return;
         }
-        
+
         [self->tableTabView selectTabViewItemAtIndex:0];
         [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableStructure];
         [self->spHistoryControllerInstance updateHistoryEntries];
-        
+
         [self->prefs setInteger:SPStructureViewMode forKey:SPLastViewMode];
 
     });
@@ -5594,7 +5597,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
             return;
         }
-        
+
         [self->tableTabView selectTabViewItemAtIndex:1];
         [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableContent];
         [self->spHistoryControllerInstance updateHistoryEntries];
@@ -5609,14 +5612,14 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
             return;
         }
-        
+
         [self->tableTabView selectTabViewItemAtIndex:2];
         [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarCustomQuery];
         [self->spHistoryControllerInstance updateHistoryEntries];
-        
+
         // Set the focus on the text field
         [[self.parentWindowController window] makeFirstResponder:self->customQueryTextView];
-        
+
         [self->prefs setInteger:SPQueryEditorViewMode forKey:SPLastViewMode];
     });
 
@@ -5629,17 +5632,17 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
             return;
         }
-        
+
         [self->tableTabView selectTabViewItemAtIndex:3];
         [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableInfo];
         [self->spHistoryControllerInstance updateHistoryEntries];
-        
+
         if ([[self table] length]) {
             [self->extendedTableInfoInstance loadTable:[self table]];
         }
-        
+
         [[self.parentWindowController window] makeFirstResponder:[self->extendedTableInfoInstance valueForKeyPath:@"tableCreateSyntaxTextView"]];
-        
+
         [self->prefs setInteger:SPTableInfoViewMode forKey:SPLastViewMode];
     });
 
@@ -5652,11 +5655,11 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
             return;
         }
-        
+
         [self->tableTabView selectTabViewItemAtIndex:4];
         [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableRelations];
         [self->spHistoryControllerInstance updateHistoryEntries];
-        
+
         [self->prefs setInteger:SPRelationsViewMode forKey:SPLastViewMode];
     });
 
@@ -5669,11 +5672,11 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
             return;
         }
-        
+
         [self->tableTabView selectTabViewItemAtIndex:5];
         [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableTriggers];
         [self->spHistoryControllerInstance updateHistoryEntries];
-        
+
         [self->prefs setInteger:SPTriggersViewMode forKey:SPLastViewMode];
     });
 }
@@ -6604,3 +6607,4 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 }
 
 @end
+

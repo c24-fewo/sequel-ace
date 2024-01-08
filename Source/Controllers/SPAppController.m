@@ -171,6 +171,8 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
  */
 - (void)awakeFromNib
 {
+    [super awakeFromNib];
+    
     // Register url scheme handle
     [[NSAppleEventManager sharedAppleEventManager] setEventHandler:self
                                                        andSelector:@selector(handleEvent:withReplyEvent:)
@@ -915,7 +917,8 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
         NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
         for (NSURLQueryItem *queryItem in [components queryItems]) {
             if ([valid containsObject:queryItem.name]) {
-                [details setObject:queryItem.value forKey:queryItem.name];
+                NSString *decodedQueryItem = [queryItem.value stringByRemovingPercentEncoding];
+                [details setObject:decodedQueryItem forKey:queryItem.name];
             }
             else {
                 [invalid addObject:queryItem.name];
@@ -940,16 +943,19 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
     }
 
     if ([url user]) {
-        [details setObject:[url user] forKey:@"user"];
+        NSString *decodedUser = [[url user] stringByRemovingPercentEncoding];
+        [details setObject:decodedUser forKey:@"user"];
     }
 
     if ([url password]) {
-        [details setObject:[url password] forKey:@"password"];
+        NSString *decodedPassword = [[url password] stringByRemovingPercentEncoding];
+        [details setObject:decodedPassword forKey:@"password"];
         connect = @YES;
     }
 
     if ([[url host] length]) {
-        [details setObject:[url host] forKey:@"host"];
+        NSString *decodedHost = [[url host] stringByRemovingPercentEncoding];
+        [details setObject:decodedHost forKey:@"host"];
     } else {
         [details setObject:@"127.0.0.1" forKey:@"host"];
     }

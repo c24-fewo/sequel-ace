@@ -39,7 +39,7 @@
 "%@ rows in partial load" = "Kısmi yüklenen %@ sıra";
 
 /* text showing how many rows are in the result */
-"%@ rows in table" = "Tabloda %@ sıra var";
+"%@ rows in table" = "Tabloda %@ satır var";
 
 /* text showing how many rows matched filter */
 "%@ rows of %@%@ match filter" = "%2$@%3$@ sıradan %1$@ sıra filtreye uyuyor";
@@ -242,7 +242,7 @@
 "Add Host" = "Host Ekle";
 
 /* add global value or expression menu item */
-"Add Value or Expression…" = "Add Value or Expression…";
+"Add Value or Expression…" = "Global Değer veya İfade Ekle…";
 
 /* adding index task status message */
 "Adding index..." = "Index ekleniyor...";
@@ -263,7 +263,7 @@
 "All Databases (%)" = "Tüm Veritabanları (%)";
 
 /* All export files already exist message */
-"All the export files already exist. Do you want to replace them?" = "All the export files already exist. Do you want to replace them?";
+"All the export files already exist. Do you want to replace them?" = "Tüm dosyalar zaten mevcut. Onları değiştirmek ister misin?";
 
 /* An error for sequelace URL scheme command occurred. Probably no corresponding connection window found. */
 "An error for sequelace URL scheme command occurred. Probably no corresponding connection window found." = "An error for sequelace URL scheme command occurred. Probably no corresponding connection window found.";
@@ -1117,7 +1117,7 @@
 "Duplicate View..." = "Duplicate View...";
 
 /* partial copy database support informative message */
-"Duplicating the database '%@' is only partially supported as it contains objects other tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?" = "Duplicating the database '%@' is only partially supported as it contains objects other tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?";
+"Duplicating the database '%@' is only partially supported as it contains objects other than tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?" = "Duplicating the database '%@' is only partially supported as it contains objects other than tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?";
 
 /* edit filter */
 "Edit Filters…" = "Filtreleri Düzenle…";
@@ -1394,6 +1394,9 @@
 
 /* filter label */
 "Filter" = "Filtre";
+
+/* apply filter label */
+"Apply Filter(s)" = "Apply Filter(s)";
 
 /* filter tables menu item */
 "Filter Tables" = "Filter Tables";
@@ -1746,70 +1749,70 @@
 "Month" = "Month";
 
 /* multiple selection */
-"multiple selection" = "multiple selection";
+"multiple selection" = "çoklu seçim";
 
 /* MySQL connecting very short status message */
-"MySQL connecting..." = "MySQL connecting...";
+"MySQL connecting..." = "MySQL bağlanıyor...";
 
 /* mysql error message */
-"MySQL Error" = "MySQL Error";
+"MySQL Error" = "MySQL Hatası";
 
 /* mysql help */
-"MySQL Help" = "MySQL Help";
+"MySQL Help" = "MySQL Yardım";
 
 /* MySQL Help for Selection */
-"MySQL Help for Selection" = "MySQL Help for Selection";
+"MySQL Help for Selection" = "Seçim için MySQL Yardımı";
 
 /* MySQL Help for Word */
-"MySQL Help for Word" = "MySQL Help for Word";
+"MySQL Help for Word" = "Kelime için MySQL Yardımı";
 
 /* mysql help categories */
-"MySQL Help – Categories" = "MySQL Help – Categories";
+"MySQL Help – Categories" = "MySQL Yardımı – Kategoriler";
 
 /* mysql said message */
-"MySQL said:" = "MySQL said:";
+"MySQL said:" = "MySQL şöyle dedi:";
 
 /* shutdown server : error dialog : message */
-"MySQL said:\n%@" = "MySQL said:\n%@";
+"MySQL said:\n%@" = "MySQL şöyle dedi:\n%@";
 
 /* message of panel when error while adding row to db */
-"MySQL said:\n\n%@" = "MySQL said:\n\n%@";
+"MySQL said:\n\n%@" = "MySQL şöyle dedi:\n\n%@";
 
 /* Preferences : Themes : Initial filename for 'Export' */
-"MyTheme" = "MyTheme";
+"MyTheme" = "Tema";
 
 /* network preference pane name */
-"Network" = "Network";
+"Network" = "Ağ";
 
 /* network preference pane tooltip */
-"Network Preferences" = "Network Preferences";
+"Network Preferences" = "Ağ Tercihleri";
 
 /* file preference pane name */
-"Files" = "Files";
+"Files" = "Dosya";
 
 /* file preference pane tooltip */
-"File Preferences" = "File Preferences";
+"File Preferences" = "Dosya Tercihleri";
 
 /* Bundle Editor : Default name for new bundle in the list on the left */
-"New Bundle" = "New Bundle";
+"New Bundle" = "Yeni Paket";
 
 /* new column name placeholder string */
-"New Column Name" = "New Column Name";
+"New Column Name" = "Yeni kolon adı";
 
 /* new favorite name */
-"New Favorite" = "New Favorite";
+"New Favorite" = "Yeni Favori";
 
 /* Content Filter Manager : Initial name for new filter */
-"New Filter" = "New Filter";
+"New Filter" = "Yeni Filtre";
 
 /* new folder placeholder name */
-"New Folder" = "New Folder";
+"New Folder" = "Yeni Klasör";
 
 /* Bundle Editor : Default name for a new bundle in the menu */
-"New Name" = "New Name";
+"New Name" = "Yeni İsim";
 
 /* new table menu item */
-"New Table" = "New Table";
+"New Table" = "Yeni Tablo";
 
 /* error that no color theme found */
 "No color theme data found." = "No color theme data found.";
@@ -1911,25 +1914,25 @@
 "Open Function in New Window" = "Open Function in New Window";
 
 /* open connection in new tab context menu item */
-"Open in New Tab" = "Open in New Tab";
+"Open in New Tab" = "Yeni Sekmede Aç";
 
 /* menu item open in new window */
-"Open in New Window" = "Open in New Window";
+"Open in New Window" = "Yeni Pencerede Aç";
 
 /* open procedure in new table title */
-"Open Procedure in New Tab" = "Open Procedure in New Tab";
+"Open Procedure in New Tab" = "Prosedürü Yeni Sekmede Aç";
 
 /* Table List : Context Menu : duplicate connection to new window
  Table List : Gear Menu : duplicate connection to new window */
-"Open Procedure in New Window" = "Open Procedure in New Window";
+"Open Procedure in New Window" = "Prosedürü Yeni Pencerede Aç";
 
 /* open table in new tab title
  open table in new table title */
-"Open Table in New Tab" = "Open Table in New Tab";
+"Open Table in New Tab" = "Tabloyu Yeni Sekmede Aç";
 
 /* Table List : Context Menu : Duplicate connection to new window
  Table List : Gear Menu : Duplicate connection to new window */
-"Open Table in New Window" = "Open Table in New Window";
+"Open Table in New Window" = "Tabloyu Yeni Pencerede Aç";
 
 /* open view in new tab title
  open view in new table title */
@@ -2209,10 +2212,10 @@
 "return type: %@" = "return type: %@";
 
 /* singular word for row */
-"row" = "row";
+"row" = "satır";
 
 /* plural word for rows */
-"rows" = "rows";
+"rows" = "satırlar";
 
 /* text showing how many rows are in the limited filter match */
 "Rows %@ - %@ from filtered matches" = "Rows %1$@ - %2$@ from filtered matches";
@@ -2221,19 +2224,19 @@
 "Rows %@ - %@ of %@%@ from table" = "Rows %1$@ - %2$@ of %3$@%4$@ from table";
 
 /* Table Info Section : number of rows (exact value) */
-"rows: %@" = "rows: %@";
+"rows: %@" = "satırlar: %@";
 
 /* Table Info Section : number of rows (estimated value) */
-"rows: ~%@" = "rows: ~%@";
+"rows: ~%@" = "satırlar: ~%@";
 
 /* run all button */
-"Run All" = "Run All";
+"Run All" = "Tümünü Çalıştır";
 
 /* Run All menu item title */
-"Run All Queries" = "Run All Queries";
+"Run All Queries" = "Tüm Sorguları Çalıştır";
 
 /* Title of button to run current query in custom query view */
-"Run Current" = "Run Current";
+"Run Current" = "Sorguyu Çalıştır";
 
 /* Title of action menu item to run current query in custom query view */
 "Run Current Query" = "Run Current Query";
@@ -2618,55 +2621,55 @@
 "Table Info" = "Table Info";
 
 /* header for table info pane */
-"TABLE INFORMATION" = "TABLE INFORMATION";
+"TABLE INFORMATION" = "TABLO BİLGİLERİ";
 
 /* table information print heading */
-"Table Information" = "Table Information";
+"Table Information" = "Tablo Bilgileri";
 
 /* message of panel when no name is given for table */
-"Table must have a name." = "Table must have a name.";
+"Table must have a name." = "Tablonun bir adı olmalıdır.";
 
 /* general preference pane tooltip */
-"Table Preferences" = "Table Preferences";
+"Table Preferences" = "Tablo Tercihleri";
 
 /* toolbar item label for switching to the Table Relations tab */
-"Table Relations" = "Table Relations";
+"Table Relations" = "Tablo İlişkileri";
 
 /* Bundle Editor : Scope=Data-Table : Trigger dropdown : 'table row changed' item */
-"Table Row changed" = "Table Row changed";
+"Table Row changed" = "Tablo Satırı Değiştirildi";
 
 /* table structure print heading */
-"Table Structure" = "Table Structure";
+"Table Structure" = "Tablo Yapısı";
 
 /* toolbar item label for switching to the Table Triggers tab */
 "Table Triggers" = "Table Triggers";
 
 /* Add Relation sheet title, showing table name */
-"Table: %@" = "Table: %@";
+"Table: %@" = "Tablo: %@";
 
 /* tables preference pane name */
-"Tables" = "Tables";
+"Tables" = "Tablolar";
 
 /* tables */
-"tables" = "tables";
+"tables" = "tablolar";
 
 /* header for table list */
-"TABLES" = "TABLES";
+"TABLES" = "TABLOLAR";
 
 /* header for table & views list */
 "TABLES & VIEWS" = "TABLES & VIEWS";
 
 /* Connection test very short status message */
-"Testing connection..." = "Testing connection...";
+"Testing connection..." = "Bağlantı test ediliyor...";
 
 /* MySQL connection test very short status message */
-"Testing MySQL..." = "Testing MySQL...";
+"Testing MySQL..." = "MySQL test ediliyor...";
 
 /* SSH testing very short status message */
-"Testing SSH..." = "Testing SSH...";
+"Testing SSH..." = "SSH test ediliyor...";
 
 /* text label for color table (Prefs > Editor) */
-"Text" = "Text";
+"Text" = "Yazı";
 
 /* Text is too long. Maximum text length is set to %llu. */
 "Text is too long. Maximum text length is set to %llu." = "Text is too long. Maximum text length is set to %llu.";
@@ -2909,7 +2912,7 @@
 "Truncate Tables" = "Truncate Tables";
 
 /* type label (Navigator) */
-"Type" = "Type";
+"Type" = "Tip";
 
 /* type declaration header */
 "Type Declaration:" = "Type Declaration:";
@@ -3014,10 +3017,10 @@
 "Unsupported version for export settings!" = "Unsupported version for export settings!";
 
 /* Name for an untitled connection */
-"Untitled" = "Untitled";
+"Untitled" = "Başlıksız";
 
 /* Title of a new Sequel Ace Document */
-"Untitled %ld" = "Untitled %ld";
+"Untitled %ld" = "Başlıksız %ld";
 
 /* range for mediumblob type */
 "Up to %@ bytes (16 MiB)" = "Up to %@ bytes (16 MiB)";
@@ -3038,10 +3041,10 @@
 "Up to 255 characters" = "Up to 255 characters";
 
 /* Open Files : Bundle : Already-Installed : Update button */
-"Update" = "Update";
+"Update" = "Güncelle";
 
 /* updated: %@ */
-"updated: %@" = "updated: %@";
+"updated: %@" = "güncellendi: %@";
 
 /* message of panel when error while updating field to db after enabling it */
 "Updating field content failed. Couldn't identify field origin unambiguously (%1$ld matches). It's very likely that while editing this field of table `%2$@` was changed." = "Updating field content failed. Couldn't identify field origin unambiguously (%1$ld matches). It's very likely that while editing this field of table `%2$@` was changed.";
@@ -3074,40 +3077,40 @@
 "User-defined value" = "User-defined value";
 
 /* toolbar item label for switching to the User Manager tab */
-"Users" = "Users";
+"Users" = "Kullanıcılar";
 
 /* CSV Field Mapping : Table View : Tooltip for fields with NULL value */
 "Value will be imported as MySQL NULL" = "Value will be imported as MySQL NULL";
 
 /* variable label for color table (Prefs > Editor) */
-"Variable" = "Variable";
+"Variable" = "Değişken";
 
 /* version */
-"version" = "version";
+"version" = "sürüm";
 
 /* export header version label */
-"Version" = "Version";
+"Version" = "Sürüm";
 
 /* view */
-"view" = "view";
+"view" = "göster";
 
 /* Release notes button title */
-"View full release notes" = "View full release notes";
+"View full release notes" = "Sürüm notlarının tamamını görüntüle";
 
 /* header for view info pane */
-"VIEW INFORMATION" = "VIEW INFORMATION";
+"VIEW INFORMATION" = "BİLGİLERİ GÖRÜNTÜLE";
 
 /* view html source code menu item title */
-"View Source" = "View Source";
+"View Source" = "Kaynağı Görüntüle";
 
 /* view structure print heading */
-"View Structure" = "View Structure";
+"View Structure" = "Yapıyı Görüntüle";
 
 /* views */
-"views" = "views";
+"views" = "görüntülenmeler";
 
 /* warning */
-"Warning" = "Warning";
+"Warning" = "Uyarı";
 
 /* Short important release note for why password prompts may occur */
 "We've changed Sequel Ace's digital signature for GateKeeper compatibility; you'll have to allow access to your passwords again." = "We've changed Sequel Ace's digital signature for GateKeeper compatibility; you'll have to allow access to your passwords again.";
@@ -3272,19 +3275,19 @@
 "A new version is available" = "A new version is available";
 
 /* new version is available download button title */
-"Download" = "Download";
+"Download" = "İndir";
 
 /* new version is available alert informativeText */
 "Version %@ is available. You are currently running %@" = "Version %@ is available. You are currently running %@";
 
 /* downloading new version window title */
-"Download Progress" = "Download Progress";
+"Download Progress" = "İndirme ilerlemesi";
 
 /* downloading new version time remaining placeholder text */
-"Calculating time remaining..." = "Calculating time remaining...";
+"Calculating time remaining..." = "Kalan süre hesaplanıyor...";
 
 /* downloading new version window message */
-"Downloading Sequel Ace - %@" = "Downloading Sequel Ace - %@";
+"Downloading Sequel Ace - %@" = "Sequel Ace İndiriliyor - %@";
 
 /* downloading new version time remaining estimate text */
 "About %.1f seconds left" = "About %.1f seconds left";
@@ -3305,7 +3308,7 @@
 "\n\ntime_zone will be set to SYSTEM." = "\n\ntime_zone will be set to SYSTEM.";
 
 /* Menu item title for checking for updates */
-"Check for Updates..." = "Check for Updates...";
+"Check for Updates..." = "Güncellemeleri Denetle...";
 
 /* Warning message during connection in case the variable skip-show-database is set to ON */
 "The skip-show-database variable of the database server is set to ON. Thus, you won't be able to list databases unless you have the SHOW DATABASES privilege.\n\nHowever, the databases are still accessible directly through SQL queries depending on your privileges." = "The skip-show-database variable of the database server is set to ON. Thus, you won't be able to list databases unless you have the SHOW DATABASES privilege.\n\nHowever, the databases are still accessible directly through SQL queries depending on your privileges.";
@@ -3320,7 +3323,7 @@
 "You are currently running the latest release." = "You are currently running the latest release.";
 
 /* Alert button, disable the warning when skip-show-database is set to on */
-"Never show this again" = "Never show this again";
+"Never show this again" = "Bunu bir daha gösterme";
 
 /* Info alert when editing a generated column */
 "The current field \"%@\" is a generated column and therefore cannot be edited." = "The current field \"%@\" is a generated column and therefore cannot be edited.";
