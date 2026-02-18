@@ -612,6 +612,12 @@
 /* unsaved changes informative message */
 "Changes have been made, which will be lost if this window is closed. Are you sure you want to continue" = "Changes have been made, which will be lost if this window is closed. Are you sure you want to continue";
 
+/* quitting app informal alert title */
+"Close the app?" = "Close the app?";
+
+/* quitting app informal alert body */
+"Are you sure you want to quit the app?" = "Are you sure you want to quit the app?";
+
 /* character set client: %@ */
 "character set client: %@" = "character set client: %@";
 
@@ -979,19 +985,19 @@
 "Delete" = "Forigi";
 
 /* delete table/view message */
-"Delete %@ '%@'?" = "Delete %1$@ '%2$@'?";
+"Delete %@ '%@'?" = "Ĉu forigi %1$@ '%2$@'?";
 
 /* table structure : indexes : delete index : error 1553 : delete index and FK button */
 "Delete Both" = "Forigi ambaŭ";
 
 /* delete database message */
-"Delete database '%@'?" = "Delete database '%@'?";
+"Delete database '%@'?" = "Ĉu forigi la datumbazon '%@'?";
 
 /* delete database message */
 "Delete favorite '%@'?" = "Delete favorite '%@'?";
 
 /* delete field message */
-"Delete field '%@'?" = "Delete field '%@'?";
+"Delete field '%@'?" = "Ĉu forigi la kampon '%@'?";
 
 /* delete func menu title */
 "Delete Function" = "Forigi la funkcion";

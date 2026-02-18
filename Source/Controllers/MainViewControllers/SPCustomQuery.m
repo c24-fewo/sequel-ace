@@ -357,7 +357,15 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
             if ([[textView.textStorage string] length] > 0) {
                 [selectedFaveQueryStr insertString:@"\n" atIndex:0];
             }
-            [textView insertAsSnippet:selectedFaveQueryStr atRange:[textView selectedRange]];
+          
+            NSRange selectedRange = [textView selectedRange];
+            // If no selected range, then make a new range then use it for appending query
+            if (!selectedRange.length) {
+              selectedRange = NSMakeRange(textView.textStorage.length, 0);
+              NSUInteger caretPosition = selectedRange.location;
+            }
+          
+            [textView insertAsSnippet:selectedFaveQueryStr atRange:selectedRange];
         }
     }
 }
@@ -389,7 +397,15 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
             if ([[textView.textStorage string] length] > 0) {
                 [selectedHistoryQueryStr insertString:@"\n" atIndex:0];
             }
-            [textView insertAsSnippet:selectedHistoryQueryStr atRange:[textView selectedRange]];
+          
+            NSRange selectedRange = [textView selectedRange];
+            // If no selected range, then make a new range then use it for appending query
+            if (!selectedRange.length) {
+              selectedRange = NSMakeRange(textView.textStorage.length, 0);
+              NSUInteger caretPosition = selectedRange.location;
+            }
+          
+            [textView insertAsSnippet:selectedHistoryQueryStr atRange:selectedRange];
         }
 
     }
@@ -464,7 +480,11 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
     // "Comment Current Query" menu item - Add or remove "-- " for each line
     // in the current query
     if (sender == commentCurrentQueryMenuItem) {
+      if ([self->prefs boolForKey:UseDashStyleForBlockComment]) {
+        [self commentOutCurrentQueryTakingSelectionWithDashes:NO];
+      } else {
         [self commentOutCurrentQueryTakingSelection:NO];
+      }
     }
     
     // "Completion List" menu item - used to autocomplete.  Uses a different shortcut to avoid the menu button flickering
@@ -1354,6 +1374,80 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
     [textView setSelectedRange:NSMakeRange(workingRange.location, n.length)];
 }
 
+
+static NSString * const SPDashStyleCommentMarker = @"-- ";
+
+/**
+ * Toggles SQL line comments ('-- ') for each line in the current query or selection.
+ */
+- (void)commentOutCurrentQueryTakingSelectionWithDashes:(BOOL)takeSelection {
+  NSRange originalRange = [textView selectedRange];
+  NSRange workingRange = takeSelection ? originalRange : currentQueryRange;
+  
+  // If there's no text selected, there's nothing to do.
+  if (workingRange.length == 0) {
+    return;
+  }
+  
+  // Expand the working range to encompass the full lines of the selection.
+  NSString *fullText = [textView string];
+  NSRange lineAdjustedRange = [fullText lineRangeForRange:workingRange];
+  
+  NSString *selectedText = [fullText substringWithRange:lineAdjustedRange];
+  NSArray<NSString *> *lines = [selectedText componentsSeparatedByString:@"\n"];
+  NSMutableArray<NSString *> *modifiedLines = [NSMutableArray arrayWithCapacity:lines.count];
+  
+  NSString *commentMarker = SPDashStyleCommentMarker;
+  BOOL shouldUncomment = NO;
+  
+  // Determine if we should comment or uncomment based on the first non-empty line.
+  for (NSString *line in lines) {
+    NSRange firstCharRange = [line rangeOfCharacterFromSet:[[NSCharacterSet whitespaceCharacterSet] invertedSet]];
+    if (firstCharRange.location != NSNotFound) {
+      NSString *codePart = [line substringFromIndex:firstCharRange.location];
+      if ([codePart hasPrefix:commentMarker]) {
+        shouldUncomment = YES;
+      }
+      break; // Decision made, stop checking lines.
+    }
+  }
+  
+  // Process each line
+  for (NSString *line in lines) {
+    NSRange firstCharRange = [line rangeOfCharacterFromSet:[[NSCharacterSet whitespaceCharacterSet] invertedSet]];
+    
+    if (shouldUncomment) {
+      // Uncomment: Remove one instance of the marker from the start of the code.
+      if (firstCharRange.location != NSNotFound && [line length] >= firstCharRange.location + [commentMarker length]) {
+        NSRange potentialMarkerRange = NSMakeRange(firstCharRange.location, commentMarker.length);
+        if ([[line substringWithRange:potentialMarkerRange] isEqualToString:commentMarker]) {
+          [modifiedLines addObject:[line stringByReplacingCharactersInRange:potentialMarkerRange withString:@""]];
+        } else {
+          [modifiedLines addObject:line];
+        }
+      } else {
+        [modifiedLines addObject:line];
+      }
+    } else {
+      // Comment: Add the marker to every non-empty line, preserving indentation.
+      if (firstCharRange.location != NSNotFound) {
+        [modifiedLines addObject:[line stringByReplacingCharactersInRange:NSMakeRange(firstCharRange.location, 0) withString:commentMarker]];
+      } else {
+        [modifiedLines addObject:line];
+      }
+    }
+  }
+  
+  NSString *replacementString = [modifiedLines componentsJoinedByString:@"\n"];
+  
+  // Perform the text replacement and update the selection
+  if ([textView shouldChangeTextInRange:lineAdjustedRange replacementString:replacementString]) {
+    [textView replaceCharactersInRange:lineAdjustedRange withString:replacementString];
+    [textView didChangeText];
+    [textView setSelectedRange:NSMakeRange(lineAdjustedRange.location, replacementString.length)];
+  }
+}
+
 /**
  * Add or remove "-- " for each line in the current query or selection,
  * if the selection is in-line wrap selection into ⁄* block comments and
@@ -1365,7 +1459,11 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
     NSRange oldRange = [textView selectedRange];
     
     if(oldRange.length) { // (un)comment selection
+      if ([self->prefs boolForKey:UseDashStyleForBlockComment]) {
+        [self commentOutCurrentQueryTakingSelectionWithDashes:YES];
+      } else {
         [self commentOutCurrentQueryTakingSelection:YES];
+      }
     } else { // single line
         
         // get the current line range
@@ -1788,7 +1886,8 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
     
     // Update font size on the table
     NSFont *tableFont = [NSUserDefaults getFont];
-    [customQueryView setRowHeight:2.0f+NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
+    NSFont *headerFont = [[NSFontManager sharedFontManager] convertFont:tableFont toSize:MAX(tableFont.pointSize * 0.75, 11.0)];
+    [customQueryView setRowHeight:4.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
     
     // If there are no table columns to add, return
     if (!cqColumnDefinition || ![cqColumnDefinition count]) return;
@@ -1817,7 +1916,10 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
         {
             [dataCell setAlignment:NSTextAlignmentRight];
         }
-        
+
+        // Set the header font to match table font
+        [[theCol headerCell] setFont:headerFont];
+
         // Set field type for validations
         [[dataCell formatter] setFieldType:[columnDefinition objectForKey:@"type"]];
         [theCol setDataCell:dataCell];
@@ -3245,8 +3347,24 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
     // Result Table Font preference changed
     else if ([keyPath isEqualToString:SPGlobalFontSettings]) {
         NSFont *tableFont = [NSUserDefaults getFont];
-        [customQueryView setRowHeight:2.0f+NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
+        NSFont *headerFont = [[NSFontManager sharedFontManager] convertFont:tableFont toSize:MAX(tableFont.pointSize * 0.75, 11.0)];
+        [customQueryView setRowHeight:4.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
         [customQueryView setFont:tableFont];
+
+        // Update header cells
+        for (NSTableColumn *column in [customQueryView tableColumns]) {
+            if ([prefs boolForKey:SPDisplayTableViewColumnTypes]) {
+                NSAttributedString *attrString = [[cqColumnDefinition safeObjectAtIndex:[[column identifier] integerValue]] tableContentColumnHeaderAttributedString];
+
+                [[column headerCell] setAttributedStringValue:attrString];
+            } else {
+                [[column headerCell] setFont:headerFont];
+            }
+        }
+
+        // Force header view to redraw
+        [customQueryView.headerView setNeedsDisplay:YES];
+
         [customQueryView reloadData];
     } else if ([keyPath isEqualToString:SPCustomQueryEnableBracketHighlighting]) {
         self.bracketHighlighter.enabled = [[change valueForKey:NSKeyValueChangeNewKey] boolValue];

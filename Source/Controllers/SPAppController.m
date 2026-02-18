@@ -29,7 +29,6 @@
 //
 //  More info at <https://github.com/sequelpro/sequelpro>
 
-#import "SPKeychain.h"
 #import "SPAppController.h"
 #import "SPDatabaseDocument.h"
 #import "SPPreferenceController.h"
@@ -167,6 +166,16 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
 }
 
 /**
+ * Close any open font panels to avoid them reopening on next launch
+ */
+- (void)closeFontPanelIfOpen {
+    NSFontPanel *fontPanel = [[NSFontManager sharedFontManager] fontPanel:NO];
+    if (fontPanel && [fontPanel isVisible]) {
+        [fontPanel close];
+    }
+}
+
+/**
  * Initialisation stuff upon nib awakening
  */
 - (void)awakeFromNib
@@ -195,27 +204,32 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
 
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-    if ([prefs boolForKey:SPSaveApplicationUsageAnalytics]) {
-        // Send time interval for non-critical logs
-        // must set before calling AppCenter.start
-        // 5 mins?
-        [MSACAnalytics setTransmissionInterval:60*5];
+    @try {
+        if ([prefs boolForKey:SPSaveApplicationUsageAnalytics]) {
+            // Send time interval for non-critical logs
+            // must set before calling AppCenter.start
+            // 5 mins?
+            [MSACAnalytics setTransmissionInterval:60*5];
 
-        // Use 30 MB for storage for logs
-        [MSACAppCenter setMaxStorageSize:(30 * 1024 * 1024) completionHandler:nil];
-        [MSACAppCenter start:@"65535bfb-1763-40fd-896b-a3aaae06227f" withServices:@[[MSACAnalytics class], [MSACCrashes class]]];
+            // Use 30 MB for storage for logs
+            [MSACAppCenter setMaxStorageSize:(30 * 1024 * 1024) completionHandler:nil];
+            [MSACAppCenter start:@"65535bfb-1763-40fd-896b-a3aaae06227f" withServices:@[[MSACAnalytics class], [MSACCrashes class]]];
 
 #ifdef DEBUG
-        // default is 5 = MSACLogLevelWarning
-        [MSACAppCenter setLogLevel:MSACLogLevelDebug];
+            // default is 5 = MSACLogLevelWarning
+            [MSACAppCenter setLogLevel:MSACLogLevelDebug];
 #endif
 
-        if(MSACAppCenter.isEnabled == YES && MSACAppCenter.isConfigured == YES){
-            SPLog(@"Started MSACAppCenter. sdkVersion: %@. defaultLogLevel: %lu", MSACAppCenter.sdkVersion, (unsigned long) MSACAppCenter.logLevel);
+            if(MSACAppCenter.isEnabled == YES && MSACAppCenter.isConfigured == YES){
+                SPLog(@"Started MSACAppCenter. sdkVersion: %@. defaultLogLevel: %lu", MSACAppCenter.sdkVersion, (unsigned long) MSACAppCenter.logLevel);
+            }
+            else{
+                SPLog(@"MSACAppCenter FAILED to start.");
+            }
         }
-        else{
-            SPLog(@"MSACAppCenter FAILED to start.");
-        }
+    }
+    @catch (NSException * e) {
+        SPLog(@"MSACAppCenter Exception on Init: %@", e);
     }
 
 
@@ -301,6 +315,10 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
             [newWindowController.databaseDocument connect];
         }
     }
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
+    return NO;
 }
 
 - (void)addCheckForUpdatesMenuItem {
@@ -1528,6 +1546,13 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
  */
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
 {
+    if ([sender keyWindow] != nil && [[NSUserDefaults standardUserDefaults] boolForKey:SPApplicationPromptOnQuit]) {
+        BOOL answer = [self dialogOKCancelWithQuestion:NSLocalizedString(@"Close the app?", @"quitting app informal alert title") text:NSLocalizedString(@"Are you sure you want to quit the app?", @"quitting app informal alert body")];
+        if (answer == NO) {
+            return NSTerminateCancel;
+        }
+    }
+
     BOOL shouldSaveFavorites = NO;
 
     // removing vacuum here. See: https://www.sqlite.org/lang_vacuum.html
@@ -1578,7 +1603,10 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
         [[SPFavoritesController sharedFavoritesController] saveFavoritesSynchronously];
     }
 
-    return YES;
+    // Close any open font panels to prevent them reopening on next launch
+    [self closeFontPanelIfOpen];
+
+    return NSTerminateNow;
 }
 
 #pragma mark -

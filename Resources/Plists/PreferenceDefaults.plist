@@ -102,7 +102,7 @@
 	<key>EditInSheetForMultiLineText</key>
 	<true/>
 	<key>SaveApplicationUsageAnalytics</key>
-	<true/>
+	<false/>
 	<key>EditInSheetForLongText</key>
 	<true/>
 	<key>EditInSheetForLongTextLengthThreshold</key>
@@ -115,12 +115,16 @@
 	<integer>2</integer>
 	<key>CustomQueryUpdateAutoHelp</key>
 	<false/>
+	<key>UseDashStyleForBlockComment</key>
+	<false/>
 	<key>DefaultEncodingTag</key>
 	<real>0</real>
 	<key>DefaultViewMode</key>
 	<integer>0</integer>
 	<key>deletedDefaultBundles</key>
 	<array/>
+	<key>ApplicationPromptOnQuit</key>
+	<true/>
 	<key>DisplayServerVersionInWindowTitle</key>
 	<true/>
 	<key>DisplayTableViewVerticalGridlines</key>

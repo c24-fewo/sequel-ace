@@ -612,6 +612,12 @@
 /* unsaved changes informative message */
 "Changes have been made, which will be lost if this window is closed. Are you sure you want to continue" = "Sollen alle gemachten Änderungen durch Schließen des Fensters verworfen werden?";
 
+/* quitting app informal alert title */
+"Close the app?" = "Close the app?";
+
+/* quitting app informal alert body */
+"Are you sure you want to quit the app?" = "Are you sure you want to quit the app?";
+
 /* character set client: %@ */
 "character set client: %@" = "Zeichensatz des Client: % @";
 
@@ -3330,7 +3336,7 @@ Befehle werden anwendungsweit ausgeführt";
 "The current field \"%@\" is a generated column and therefore cannot be edited." = "Das aktuelle Feld \"%@\" ist eine generierte Spalte und kann daher nicht bearbeitet werden.";
 
 /* Release note / info modal about change in latest release about column behavior */
-"The use of the \"default\" column has changed since the last version of Sequel ACE:\n\n- No default value : Leave it blank.\n- String value : Use single '' or double quotes \"\" if you want an empty string or to wrap a string\n- Expression : Use parentheses (). Except for the TIMESTAMP and DATETIME columns where you can specify the CURRENT_TIMESTAMP function without enclosing parentheses." = "The use of the \"default\" column has changed since the last version of Sequel ACE:\n\n- No default value : Leave it blank.\n- String value : Use single '' or double quotes \"\" if you want an empty string or to wrap a string\n- Expression : Use parentheses (). Except for the TIMESTAMP and DATETIME columns where you can specify the CURRENT_TIMESTAMP function without enclosing parentheses.";
+"The use of the \"default\" column has changed since the last version of Sequel ACE:\n\n- No default value : Leave it blank.\n- String value : Use single '' or double quotes \"\" if you want an empty string or to wrap a string\n- Expression : Use parentheses (). Except for the TIMESTAMP and DATETIME columns where you can specify the CURRENT_TIMESTAMP function without enclosing parentheses." = "Die Verwendung der \"default\" Spalte hat sich seit der letzten Version der Sequel ACE geändert:\n\n- Kein Standardwert: Lassen Sie sie leer.\n- String-Wert: Benutzen Sie einfache '' oder doppelte Anführungszeichen \"\", wenn Sie einen leeren String oder einen String\n- Ausdruck : Klammern verwenden (). Mit Ausnahme der Spalten TIMESTAMP und DATETIME können Sie die Funktion CURRENT_TIMESTAMP ohne Klammern angeben.";
 
 /* Menu option to pin a view to the top of the list of tables */
 "Pin View" = "Ansicht anpinnen";
@@ -3339,7 +3345,7 @@ Befehle werden anwendungsweit ausgeführt";
 "Pin Table" = "Tabelle anpinnen";
 
 /* Menu option to pin a procedure to the top of the list of tables */
-"Pin Procedure" = "Pin Procedure";
+"Pin Procedure" = "Pin Prozedur";
 
 /* Menu option to pin a function to the top of the list of tables */
 "Pin Function" = "Funktion anpinnen";
@@ -3351,7 +3357,7 @@ Befehle werden anwendungsweit ausgeführt";
 "Unpin Table" = "Tabelle loslösen";
 
 /* Menu option to unpin a procedure which is currently pinned at the top of the list of tables */
-"Unpin Procedure" = "Unpin Procedure";
+"Unpin Procedure" = "Prozedur lösen";
 
 /* Menu option to unpin a function which is currently pinned at the top of the list of tables */
 "Unpin Function" = "Funktion loslösen";
@@ -3363,7 +3369,7 @@ Befehle werden anwendungsweit ausgeführt";
 "Copy Table Name" = "Tabellennamen kopieren";
 
 /* sequelace URL scheme error: LaunchFavorite alert title (favorite name not found) */
-"LaunchFavorite URL Scheme Error" = "LaunchFavorite URL Scheme Error";
+"LaunchFavorite URL Scheme Error" = "Fehler beim LaunchFavoriten URL-Schema";
 
 /* sequelace URL scheme error: LaunchFavorite alert description (favorite name not found) */
 "The variable in the ?name= query parameter could not be matched with any of your favorites." = "Die Variable im Parameter ?name= stimmt mit keinem Ihrer Favoriten überein.";

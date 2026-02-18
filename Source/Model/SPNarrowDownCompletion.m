@@ -340,7 +340,7 @@ withDBStructureRetriever:(SPDatabaseStructure *)theDatabaseStructure
 	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	[scrollView setAutohidesScrollers:YES];
 	[scrollView setHasVerticalScroller:YES];
-	[scrollView setHasHorizontalScroller:NO];
+	[scrollView setHasHorizontalScroller:YES];
 	[[scrollView verticalScroller] setControlSize:NSControlSizeSmall];
 	[[scrollView horizontalScroller] setControlSize:NSControlSizeSmall];
 
@@ -873,13 +873,9 @@ withDBStructureRetriever:(SPDatabaseStructure *)theDatabaseStructure
 			else if([textualInputCharacters characterIsMember:key]) {
 				if (autocompletePlaceholderWasInserted) [self removeAutocompletionPlaceholderUsingFastMethod:YES];
 
-				if (autoCompletionMode) {
-					[theView setCompletionIsOpen:NO];
-					[self close];
-					[NSApp sendEvent:event];
-					return;
-				}
-
+				// Related to the fix of issue #625 (https://github.com/sequelpro/sequelpro/issues/625), 
+				// it has introduced a side effect where the auto-completion popup closes prematurely, 
+				// even when the user is still typing and the current input matches items in the list.
 				[NSApp sendEvent:event];
 
 				if(commaInsertionMode) break;
