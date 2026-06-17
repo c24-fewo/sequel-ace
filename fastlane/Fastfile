@@ -1,246 +1,51 @@
-# By Jakub Kaspar 21/11/2020
-# Copyright © 2020 Sequel-Ace. All rights reserved.
+default_platform(:mac)
 
-# Fastlane Constants
-default_platform :mac
-fastlane_version "2.168.0"
-
-GITHUB_REPO = "Sequel-Ace/Sequel-Ace"
-PROJECT_NAME = "sequel-ace.xcodeproj"
-QK_PROJECT_NAME = "Frameworks/QueryKit/QueryKit.xcodeproj"
-SPMYSQL_PROJECT_NAME = "Frameworks/SPMySQLFramework/SPMySQLFramework.xcodeproj"
-TARGET_NAME = "Sequel Ace"
+CODESIGN_IDENTITY = "Developer ID Application: CHECK24 Vergleichsportal Ferienwohnungen GmbH".freeze
+TEAM_ID = "L8NKS8SMU3".freeze
+BUNDLE_IDENTIFIER = "de.check24.ferienwohnung.sequel-ace".freeze
+PROVISION_PROFILE_NAME = "Sequel Ace Distribution".freeze
+KEYCHAIN_PATH = "Signing/sequel-ace.keychain".freeze
 
 platform :mac do
+  desc "Build and sign macOS app for ad-hoc distribution"
+  lane :build_and_sign_mac_app do | options |
+    unlock_and_add_keychain(
+        password: options[:keychain_password]
+    )
+    
+    install_provisioning_profile(
+        path: "Signing/Sequel_Ace_Distribution.provisionprofile"
+    )
+        
+    update_code_signing_settings(
+        use_automatic_signing: false,
+        code_sign_identity: CODESIGN_IDENTITY,
+        team_id: TEAM_ID,
+        bundle_identifier: BUNDLE_IDENTIFIER,
+        profile_name: PROVISION_PROFILE_NAME,
+        targets: "Sequel Ace"
+    )
+    
+    gym(
+        clean: true,
+        scheme: "Sequel Ace Release",
+        configuration: "Distribution",
+        export_method: "developer-id",
+        export_options: {
+            provisioningProfiles: {
+                "de.check24.ferienwohnung.sequel-ace" => PROVISION_PROFILE_NAME,
+            },
+        },
+        output_directory: "build",
+    )
+  end
+end
 
-   ############################## Overrides ##############################
-
-   before_all do
-   end
-
-   after_all do |lane|
-      clean_build_artifacts
-   end
-
-   error do |lane, exception|
-      clean_build_artifacts
-   end
-
-   desc "Creates new branch prepare_release, updates strings, increments build version, generates changelog, creates a PR."
-   lane :prepare_release do |options|
-   
-      # Checkout to prepare release branch
-      sh "git checkout -b prepare_release"
-      ensure_git_branch(
-         branch: 'prepare_release'
-      )
-      sh "git push -u origin prepare_release"
-      
-      increment_build_version
-      changelog = generate_changelog_locally
-
-      # Commit and push changelog changes
-      sh "git commit -am 'Changelog updates'"
-      sh "git push -u origin prepare_release"
-
-      # Create Pull request to master
-      create_pull_request(
-         api_token: ENV['GITHUB_TOKEN'],
-         repo: GITHUB_REPO,
-         base: "main",
-         title: "Prepare release",
-         body: changelog
-      )
-   end
-
-   desc "Creates new branch prepare_release, increments app patch version, updates strings, increments build version, generates changelog, creates a PR."
-   lane :prepare_release_bump_patch_version do |options|
-   
-      # Checkout to prepare release branch
-      sh "git checkout -b prepare_release"
-      ensure_git_branch(
-         branch: 'prepare_release'
-      )
-      sh "git push -u origin prepare_release"
-      
-      increment_app_patch_version
-      increment_build_version
-      
-      changelog = generate_changelog_locally
-
-      # Commit and push changelog changes
-      sh "git commit -am 'Changelog updates'"
-      sh "git push -u origin prepare_release"
-
-      # Create Pull request to master
-      create_pull_request(
-         api_token: ENV['GITHUB_TOKEN'],
-         repo: GITHUB_REPO,
-         base: "main",
-         title: "Prepare release",
-         body: changelog
-      )
-   end
-
-   desc "Creates new branch prepare_release, updates strings, increments app version, increments build version, generates changelog, creates a PR."
-   lane :prepare_beta_release_bump_version do |options|
-
-      # Checkout to prepare release branch
-      sh "git checkout -b prepare_release"
-      ensure_git_branch(
-         branch: 'prepare_release'
-      )
-      sh "git push -u origin prepare_release"
-
-      increment_app_version
-      increment_build_version
-      
-      changelog = generate_changelog_locally
-      
-      sh "git push -u origin prepare_release"
-
-      # Create Pull request to master
-      create_pull_request(
-         api_token: ENV['GITHUB_TOKEN'],
-         repo: GITHUB_REPO,
-         base: "main",
-         title: "Prepare Beta release",
-         body: changelog
-      )
-
-      reset_git_repo(
-         skip_clean: true,
-         force: true,
-         files: [
-            "CHANGELOG.md"
-         ]
-      )
-   end
-
-   desc "Creates new branch prepare_release, updates strings, increments app patch version, increments build version, generates changelog, creates a PR."
-   lane :prepare_beta_release_bump_patch_version do |options|
-
-      # Checkout to prepare release branch
-      sh "git checkout -b prepare_release"
-      ensure_git_branch(
-         branch: 'prepare_release'
-      )
-      sh "git push -u origin prepare_release"
-
-      increment_app_patch_version
-      increment_build_version
-      
-      changelog = generate_changelog_locally
-      
-      sh "git push -u origin prepare_release"
-
-      # Create Pull request to master
-      create_pull_request(
-         api_token: ENV['GITHUB_TOKEN'],
-         repo: GITHUB_REPO,
-         base: "main",
-         title: "Prepare Beta release",
-         body: changelog
-      )
-
-      reset_git_repo(
-         skip_clean: true,
-         force: true,
-         files: [
-            "CHANGELOG.md"
-         ]
-      )
-   end
-
-   desc "Creates new branch prepare_release, updates strings, increments build version, generates changelog, creates a PR."
-   lane :prepare_beta_release do |options|
-
-      # Checkout to prepare release branch
-      sh "git checkout -b prepare_release"
-      ensure_git_branch(
-         branch: 'prepare_release'
-      )
-      sh "git push -u origin prepare_release"
-      
-      increment_build_version
-      
-      changelog = generate_changelog_locally
-      
-      sh "git push -u origin prepare_release"
-
-      # Create Pull request to master
-      create_pull_request(
-         api_token: ENV['GITHUB_TOKEN'],
-         repo: GITHUB_REPO,
-         base: "main",
-         title: "Prepare Beta release",
-         body: changelog
-      )
-
-      reset_git_repo(
-         skip_clean: true,
-         force: true,
-         files: [
-            "CHANGELOG.md"
-         ]
-      )
-   end
-
-   ############################## XCode ##############################
-
-   desc "Creates new branch changelog, generates changelog, creates a PR."
-   lane :generate_changelog do |options|
-
-      # Checkout to changelog branch
-      sh "git checkout -b changelog"
-      ensure_git_branch(
-         branch: 'changelog'
-      )
-      
-      changelog = generate_changelog_locally
-
-      # Commit and push changelog changes
-      sh "git commit -am 'Changelog updates'"
-      sh "git push -u origin changelog"
-
-      # Create Pull request to master
-      create_pull_request(
-         api_token: ENV['GITHUB_TOKEN'],
-         repo: GITHUB_REPO,
-         base: "main",
-         title: "Changelog",
-         body: changelog
-      )
-   end
-
-   desc "Generates changelog only."
-   lane :generate_changelog_locally do |options|
-      version = get_version_number(xcodeproj: PROJECT_NAME, target: TARGET_NAME)
-      sh "../Scripts/generate-changelog.sh #{version}"
-   end
-
-   desc "Increase build number"
-   lane :increment_build_version do |options|
-      # Bump build number
-      increment_build_number(xcodeproj: PROJECT_NAME)
-      increment_build_number(xcodeproj: QK_PROJECT_NAME)
-      increment_build_number(xcodeproj: SPMYSQL_PROJECT_NAME)
-      sh "git add -A && git commit -m 'Increment build version'"
-   end
-
-   desc "Increase app version"
-   lane :increment_app_version do |options|
-      increment_version_number(xcodeproj: PROJECT_NAME, bump_type: "minor")
-      increment_version_number(xcodeproj: QK_PROJECT_NAME, bump_type: "minor")
-      increment_version_number(xcodeproj: SPMYSQL_PROJECT_NAME, bump_type: "minor")
-      sh "git add -A && git commit -m 'Increment app version'"
-   end
-
-   desc "Increase app patch version"
-   lane :increment_app_patch_version do |options|
-      increment_version_number(xcodeproj: PROJECT_NAME, bump_type: "patch")
-      increment_version_number(xcodeproj: QK_PROJECT_NAME, bump_type: "patch")
-      increment_version_number(xcodeproj: SPMYSQL_PROJECT_NAME, bump_type: "patch")
-      sh "git add -A && git commit -m 'Increment app patch version'"
-   end
+private_lane :unlock_and_add_keychain do |options|
+    unlock_keychain(
+        path: KEYCHAIN_PATH,
+        password: options[:password],
+        add_to_search_list: :add,
+        set_default: true
+    )
 end

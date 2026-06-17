@@ -114,6 +114,7 @@ NSString *SPAutoConnectToDefault                 = @"AutoConnectToDefault";
 NSString *SPDefaultViewMode                      = @"DefaultViewMode";
 NSString *SPLastViewMode                         = @"LastViewMode";
 NSString *SPDefaultEncoding                      = @"DefaultEncodingTag";
+NSString *SPApplicationPromptOnQuit              = @"ApplicationPromptOnQuit";
 NSString *SPDisplayTableViewVerticalGridlines    = @"DisplayTableViewVerticalGridlines";
 NSString *SPDisplayTableViewColumnTypes          = @"DisplayTableViewColumnTypes";
 NSString *SPDisplayCommentsInTablesList          = @"DisplayCommentsInTablesList";
@@ -187,6 +188,7 @@ NSString *SPCustomQueryFunctionCompletionInsertsArguments = @"CustomQueryFunctio
 NSString *SPCustomQueryEditorThemeName           = @"CustomQueryEditorThemeName";
 NSString *SPCustomQuerySoftIndent                = @"CustomQuerySoftIndent";
 NSString *SPCustomQuerySoftIndentWidth           = @"CustomQuerySoftIndentWidth";
+NSString *UseDashStyleForBlockComment            = @"UseDashStyleForBlockComment";
 
 // AutoUpdate Prefpane
 NSString *SPLastUsedVersion                      = @"LastUsedVersion";
@@ -498,7 +500,6 @@ NSString *SPBundleShellVariableAppCallbackURL               = @"SP_APP_CALLBACK_
 #define OWS @"\\s*" /* optional whitespace */
 //                                                    CURRENT_TIMESTAMP    [            (           [n]          )    ]
 NSString *SPCurrentTimestampPattern = (@"(?i)^" OWS @"CURRENT_TIMESTAMP" @"(?:" OWS @"\\(" OWS @"(\\d*)" OWS @"\\)" @")?" OWS @"$");
-#undef OWS
 
 // URL scheme
 NSString *SPURLSchemeQueryInputPathHeader          = @"~/tmp/SP_QUERY_";

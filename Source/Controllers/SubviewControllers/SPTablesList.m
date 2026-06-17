@@ -154,7 +154,7 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 	addTableCharsetHelper = [[SPCharsetCollationHelper alloc] initWithCharsetButton:tableEncodingButton CollationButton:tableCollationButton];
 
 	NSFont *tableFont = [NSUserDefaults getFont];
-	[tablesListView setRowHeight:2.0f+NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
+	[tablesListView setRowHeight:4.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
 
 	for (NSTableColumn *column in [tablesListView tableColumns]) {
 		[[column dataCell] setFont:tableFont];
@@ -172,9 +172,12 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 	// Table font preference changed
 	if ([keyPath isEqualToString:SPGlobalFontSettings]) {
 		NSFont *tableFont = [NSUserDefaults getFont];
-		[tablesListView setRowHeight:2.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
+		[tablesListView setRowHeight:4.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
 		[tablesListView setFont:tableFont];
 		[tablesListView reloadData];
+		// Force a visual refresh of the table list
+		[tablesListView setNeedsDisplay:YES];
+		[tablesListView displayIfNeeded];
 	}
 	else {
 		[super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
@@ -217,6 +220,9 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 		[self->tables removeAllObjects];
 		[self->tableTypes removeAllObjects];
 		[self->tablesListView reloadData];
+		// Force a visual refresh of the table list
+		[self->tablesListView setNeedsDisplay:YES];
+		[self->tablesListView displayIfNeeded];
 	});
 
 	if ([tableDocumentInstance database]) {
@@ -283,9 +289,6 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 				}
 			}
 		}
-
-		// Reorder the tables in alphabetical order
-		[tables sortArrayUsingSelector:@selector(localizedCompare:) withPairedMutableArrays:tableTypes, nil];
 
 		/* Grab the procedures and functions
 		 *
@@ -633,7 +636,7 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 	}
 
     // from docs:
-    // A window that uses NSWindowStyleMaskBorderless can’t become key or main
+    // A window that uses NSWindowStyleMaskBorderless can't become key or main
     // meaning it can't take input, so switch the style here.
     // It doesn't change how the popup looks.
     copyTableSheet.styleMask = NSWindowStyleMaskTitled;
@@ -726,22 +729,39 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 }
 
 - (IBAction)togglePinTable:(nullable id)sender {
-	if (!selectedTableName) {
+  NSIndexSet *indexes = [tablesListView selectedRowIndexes];
+  SPLog(@"togglePinTable");
+  
+  if (!selectedTableName && !indexes) {
+    SPLog(@"no table selected");
 		return;
 	}
-
-    NSString *databaseName = [mySQLConnection database];
-    NSString *hostName = [mySQLConnection host];
-
-	if ([pinnedTables containsObject:selectedTableName]) { // unpin selection
-        [_SQLitePinnedTableManager unpinTableWithHostName:hostName databaseName:databaseName tableToUnpin:selectedTableName];
-	}
-	else { // pin selection
-        [_SQLitePinnedTableManager pinTableWithHostName:hostName databaseName:databaseName tableToPin:selectedTableName];
-	}
-    
-    [[NSNotificationCenter defaultCenter] postNotificationName:pinnedTableNotificationName object:nil];
-    // actual pin toggle will happen when notification is received and processed
+  
+  NSString *databaseName = [mySQLConnection database];
+  NSString *hostName = [mySQLConnection host];
+  
+  NSMutableArray *selectedTables = [NSMutableArray array];
+  BOOL isPinned = NO;
+  
+  if (selectedTableName) {
+    [selectedTables addObject:selectedTableName];
+    isPinned = [pinnedTables containsObject:selectedTableName];
+  } else {
+    selectedTables = [NSMutableArray arrayWithArray:[filteredTables objectsAtIndexes:indexes]];
+    isPinned = [[sender title] isEqualToString:@"Unpin Tables"];
+  }
+  
+  for (NSString *tableName in selectedTables) {
+    if (isPinned) { // unpin selection
+      [_SQLitePinnedTableManager unpinTableWithHostName:hostName databaseName:databaseName tableToUnpin:tableName];
+    } else { // pin selection
+      [_SQLitePinnedTableManager pinTableWithHostName:hostName databaseName:databaseName tableToPin:tableName];
+    }
+  }
+  
+  [tablesListView deselectAll:self];
+  [[NSNotificationCenter defaultCenter] postNotificationName:pinnedTableNotificationName object:nil];
+  // actual pin toggle will happen when notification is received and processed
 }
 
 
@@ -877,6 +897,9 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 		// Update the selected table name and type
 		
 		if (selectedTableName) selectedTableName = nil;
+
+    [pinTableContextMenuItem setHidden:YES];
+    [pinTableMenuItem setHidden:YES];
 		
 		// Set gear menu items Remove/Duplicate table/view according to the table types
 		// if at least one item is selected
@@ -885,6 +908,18 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 			NSUInteger currentIndex = [indexes lastIndex];
 			BOOL areTableTypeEqual = YES;
 			NSInteger lastType = [[filteredTableTypes objectAtIndex:currentIndex] integerValue];
+      
+      
+      // If every selected table is pinned, show the "Unpin Tables" menu item
+      // If at least one selected table is not pinned, show the "Pin Tables" menu item
+      BOOL isGroupPinned = YES;
+      for (NSUInteger index = [indexes firstIndex]; index != NSNotFound; index = [indexes indexGreaterThanIndex:index]) {
+        if (![pinnedTables containsObject:[filteredTables objectAtIndex:index]]) {
+          SPLog(@"Found table %@ isn't pinned", [filteredTables objectAtIndex:index]);
+          isGroupPinned = NO;
+          break;
+        }
+      }
 
 			while (currentIndex != NSNotFound)
 			{
@@ -904,6 +939,10 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 						[truncateTableButton setTitle:NSLocalizedString(@"Truncate Tables", @"truncate tables menu item")];
 						[removeTableContextMenuItem setTitle:NSLocalizedString(@"Delete Tables", @"delete tables menu title")];
 						[truncateTableContextMenuItem setTitle:NSLocalizedString(@"Truncate Tables", @"truncate tables menu item")];
+            [pinTableMenuItem setTitle:NSLocalizedString(!isGroupPinned ? @"Pin Tables" : @"Unpin Tables", @"pin tables menu title")];
+            [pinTableContextMenuItem setTitle:NSLocalizedString(!isGroupPinned ? @"Pin Tables" : @"Unpin Tables", @"pin tables menu title")];
+            [pinTableMenuItem setHidden:NO];
+            [pinTableContextMenuItem setHidden:NO];
 						[truncateTableButton setHidden:NO];
 						[truncateTableContextMenuItem setHidden:NO];
 						break;
@@ -940,8 +979,7 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 		[renameTableContextMenuItem setHidden:YES];
 		[openTableInNewTabContextMenuItem setHidden:YES];
 		[openTableInNewWindowContextMenuItem setHidden:YES];
-		[pinTableContextMenuItem setHidden:YES];
-        [copyTableNameContextMenuItem setHidden:YES];
+    [copyTableNameContextMenuItem setHidden:YES];
 		[separatorTableContextMenuItem3 setHidden:NO];
 		[duplicateTableContextMenuItem setHidden:YES];
 		[separatorTableContextMenuItem setHidden:YES];
@@ -955,7 +993,6 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 		[renameTableMenuItem setHidden:YES];
 		[openTableInNewTabMenuItem setHidden:YES];
 		[openTableInNewWindowMenuItem setHidden:YES];
-		[pinTableMenuItem setHidden:YES];
 		[separatorTableMenuItem3 setHidden:NO];
 		[duplicateTableMenuItem setHidden:YES];
 		[separatorTableMenuItem setHidden:YES];
@@ -1316,6 +1353,14 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 }
 
 /**
+ * Database tables accessor
+ */
+- (NSArray *)pinnedTables
+{
+    return pinnedTables;
+}
+
+/**
  * Database tables accessors for a given table type.
  */
 - (NSArray *)allTableAndViewNames
@@ -1670,28 +1715,50 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 		// Table has invalid name, and since we trimmed whitespace and checked for empty string, this means there is already a table with that name
 		[NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Error", @"error") message:[NSString stringWithFormat: NSLocalizedString(@"The name '%@' is already used.", @"message when trying to rename a table/view/proc/etc to an already used name"), newTableName] callback:nil];
 		return;
-	}
+  }
+  
+  __block BOOL isRenamed = NO;
+  if ([prefs boolForKey:SPQueryWarningEnabled]) {
+    [NSAlert createDefaultAlertWithTitle:NSLocalizedString(@"Rename table", @"Rename table")
+                                 message:[NSString stringWithFormat:NSLocalizedString(@"Do you want to rename '%@' table to '%@'?", @"rename table description"), 
+                                          selectedTableName,
+                                          newTableName]
+                      primaryButtonTitle:NSLocalizedString(@"Confirm", @"Confirmation for renaming table")
+                    primaryButtonHandler:^{
+      [self renameTableOfType:self->selectedTableType from:self->selectedTableName to:newTableName];
+      isRenamed = YES;
+    }
+                     cancelButtonHandler:nil];
+  } else {
+    [self renameTableOfType:selectedTableType from:selectedTableName to:newTableName];
+    isRenamed = YES;
+  }
+  
+  if (!isRenamed) {
+    return;
+  }
 
-	@try {
-		// first: update the database
-		[self _renameTableOfType:selectedTableType from:selectedTableName to:newTableName];
-        
-        // second : unpin selectedTableName and pin newTableName
-        [self handlePinnedTableRenameFrom:selectedTableName To:newTableName];
+  // Set window title to reflect the new table name
+  [tableDocumentInstance updateWindowTitle:self];
+  
+  // Query the structure of all databases in the background (mainly for completion)
+  [[tableDocumentInstance databaseStructureRetrieval] queryDbStructureInBackgroundWithUserInfo:@{@"forceUpdate" : @YES}];
+}
 
-		// third: do full refresh
-        [self updateTables:self];
-        
-	}
-	@catch (NSException * myException) {
-		[NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Error", @"error") message:[myException reason] callback:nil];
-	}
-
-	// Set window title to reflect the new table name
-	[tableDocumentInstance updateWindowTitle:self];
-
-	// Query the structure of all databases in the background (mainly for completion)
-	[[tableDocumentInstance databaseStructureRetrieval] queryDbStructureInBackgroundWithUserInfo:@{@"forceUpdate" : @YES}];
+- (void) renameTableOfType:(SPTableType)tableType from:(NSString *)fromTableName to:(NSString *)toTableName {
+  @try {
+    // first: update the database
+    [self _renameTableOfType:tableType from:fromTableName to:toTableName];
+    
+    // second : unpin fromTableName and pin toTableName
+    [self handlePinnedTableRenameFrom:fromTableName To:toTableName];
+    
+    // third: do full refresh
+    [self updateTables:self];
+  }
+  @catch (NSException * myException) {
+    [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Error", @"error") message:[myException reason] callback:nil];
+  }
 }
 
 #pragma mark -
@@ -1923,7 +1990,7 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 		return 25;
 	} else {
 		NSFont *tableFont = [NSUserDefaults getFont];
-		return 2.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height;
+		return 4.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height;
 	}
 }
 
@@ -2941,7 +3008,7 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 {
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 	[prefs removeObserver:self forKeyPath:SPGlobalFontSettings];
-
+	
     NSLog(@"Dealloc called %s", __FILE_NAME__);
 }
 

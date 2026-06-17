@@ -299,6 +299,7 @@ extern NSString *SPDataSupportFolder;
 extern NSString *SPTableContentFilterKey;
 
 // General Prefpane
+extern NSString *SPApplicationPromptOnQuit;
 extern NSString *SPDefaultFavorite;
 extern NSString *SPSelectLastFavoriteUsed;
 extern NSString *SPLastFavoriteID;
@@ -375,6 +376,7 @@ extern NSString *SPCustomQueryFunctionCompletionInsertsArguments;
 extern NSString *SPCustomQueryEditorThemeName;
 extern NSString *SPCustomQuerySoftIndent;
 extern NSString *SPCustomQuerySoftIndentWidth;
+extern NSString *UseDashStyleForBlockComment;
 
 // AutoUpdate Prefpane
 extern NSString *SPLastUsedVersion;

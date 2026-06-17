@@ -54,7 +54,7 @@
 #import <SPMySQL/SPMySQL.h>
 
 #pragma mark -
-#pragma mark attribute definition 
+#pragma mark attribute definition
 
 #define kAPlinked      @"Linked" // attribute for a via auto-pair inserted char
 #define kAPval         @"linked"
@@ -122,7 +122,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 - (void) awakeFromNib
 {
     [super awakeFromNib];
-    
+
 	prefs = [NSUserDefaults standardUserDefaults];
 	[self setFont:[NSUnarchiver unarchiveObjectWithData:[prefs dataForKey:SPCustomQueryEditorFont]]];
 
@@ -191,9 +191,9 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			{ .p = SPCustomQueryEditorSelectionColor,      .m = @selector(_setTextSelectionColor:) },
 			{ .p = nil, .m = NULL } // stop key
 		};
-		
+
 		struct csItem *item = &colorSetup[0];
-		
+
 		NSDictionary *vendorDefaults = [prefs volatileDomainForName:NSRegistrationDomain]; //prefs from -registerDefaults: in app controller
 
 		do {
@@ -216,7 +216,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	}
 
 	[self setEnableSyntaxHighlighting:[prefs boolForKey:SPCustomQueryEnableSyntaxHighlighting]];
-	
+
 	[self setShouldHiliteQuery:[prefs boolForKey:SPCustomQueryHighlightCurrentQuery]];
 
 	[self setAutomaticDashSubstitutionEnabled:NO];  // prevents -- from becoming —, the em dash.
@@ -360,9 +360,11 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
  */
 - (NSArray *)suggestionsForSQLCompletionWith:(NSString *)currentWord dictMode:(BOOL)isDictMode browseMode:(BOOL)dbBrowseMode withTableName:(NSString*)aTableName withDbName:(NSString*)aDbName
 {
-
 	NSMutableArray *possibleCompletions = [[NSMutableArray alloc] initWithCapacity:32];
 	if(currentWord == nil) currentWord = @"";
+
+	// Extract tables used in current query for prioritization
+	NSMutableSet *queryTables = [self extractTablesFromCurrentQuery];
 
 	// If caret is not inside backticks add keywords and all words coming from the view.
 	if(!dbBrowseMode)
@@ -448,7 +450,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			NSString* mysql_id = [NSString stringWithFormat:@"%@%@%@", connectionID, SPUniqueSchemaDelimiter, SPMySQLDatabase];
 			NSString* inf_id   = [NSString stringWithFormat:@"%@%@%@", connectionID, SPUniqueSchemaDelimiter, SPMySQLInformationSchemaDatabase];
 			NSString* perf_id  = [NSString stringWithFormat:@"%@%@%@", connectionID, SPUniqueSchemaDelimiter, SPMySQLPerformanceSchemaDatabase];
-			
+
 			if(currentDb && ![currentDb isEqualToString:mysql_id] && [sortedDbs containsObject:mysql_id]) {
 				[sortedDbs removeObject:mysql_id];
 				[sortedDbs addObject:mysql_id];
@@ -515,7 +517,29 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 					[sortedTables addObject:aTableName_id];
 				} else {
 					[possibleCompletions addObject:[NSDictionary dictionaryWithObjectsAndKeys:[[db componentsSeparatedByString:SPUniqueSchemaDelimiter] lastObject], @"display", @"database-small", @"image", @"", @"isRef", nil]];
-					[sortedTables addObjectsFromArray:[allTables sortedArrayUsingDescriptors:@[desc]]];
+
+					// Prioritize tables used in current query
+					NSMutableArray *queryTablesInDb = [NSMutableArray array];
+					NSMutableArray *otherTables = [NSMutableArray array];
+
+					for (id tableId in allTables) {
+						NSString *tableName = [[tableId componentsSeparatedByString:SPUniqueSchemaDelimiter] lastObject];
+						if ([queryTables containsObject:[tableName lowercaseString]]) {
+							[queryTablesInDb addObject:tableId];
+						} else {
+							[otherTables addObject:tableId];
+						}
+					}
+
+					// Sort query tables alphabetically first, then other tables
+					[queryTablesInDb sortUsingDescriptors:@[desc]];
+					[otherTables sortUsingDescriptors:@[desc]];
+
+					// Combine with query tables first
+					[sortedTables addObjectsFromArray:queryTablesInDb];
+					[sortedTables addObjectsFromArray:otherTables];
+
+					// Move current table to front if it exists
 					if([sortedTables count] > 1 && [sortedTables containsObject:[NSString stringWithFormat:@"%@%@%@", db, SPUniqueSchemaDelimiter, currentTable]]) {
 						[sortedTables removeObject:[NSString stringWithFormat:@"%@%@%@", db, SPUniqueSchemaDelimiter, currentTable]];
 						[sortedTables insertObject:[NSString stringWithFormat:@"%@%@%@", db, SPUniqueSchemaDelimiter, currentTable] atIndex:0];
@@ -712,7 +736,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	}
 
 	[self breakUndoCoalescing];
-	
+
 	// Remember state for refreshCompletion
 	completionFuzzyMode = fuzzySearch;
 
@@ -767,7 +791,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			currentDb = [tablesListInstance selectedDatabase];
 		else
 			currentDb = @"";
-		
+
 		BOOL caretIsInsideBackticks = NO;
 
 		// Is the caret inside backticks
@@ -975,6 +999,90 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 }
 
 /**
+ * Extract table names from current query (FROM, JOIN, ON clauses) for prioritization
+ */
+- (NSMutableSet *)extractTablesFromCurrentQuery
+{
+	NSMutableSet *tables = [NSMutableSet set];
+	NSString *queryText = [self string];
+
+	// Find current query boundaries (from last semicolon to current caret or end of query)
+	NSRange currentRange = [self getCurrentQueryRange];
+	if (currentRange.location == NSNotFound) return tables;
+
+	NSString *currentQuery = [queryText substringWithRange:currentRange];
+
+	// Regular expression to match table names after FROM, JOIN keywords
+	// This handles: FROM table, JOIN table, FROM db.table, JOIN db.table, etc.
+	// Supports backtick-quoted identifiers with spaces/special chars
+	NSError *error = nil;
+	NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:
+		@"(?i)\\b(FROM|JOIN)\\s+((?:`[^`]+`|[\\w]+)(?:\\.(?:`[^`]+`|[\\w]+))?(?:\\s+AS\\s+\\w+)?)"
+		options:0
+		error:&error];
+
+	if (!error) {
+		[regex enumerateMatchesInString:currentQuery
+								options:0
+								  range:NSMakeRange(0, [currentQuery length])
+							   usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+			if ([match numberOfRanges] >= 3) {
+				NSString *tableReference = [currentQuery substringWithRange:[match rangeAtIndex:2]];
+
+				// Extract table name (remove backticks and database prefix if present)
+				NSString *tableName = [tableReference stringByReplacingOccurrencesOfString:@"`" withString:@""];
+
+				// Remove alias if present (AS keyword handling)
+				NSRange asRange = [tableName rangeOfString:@" AS " options:NSCaseInsensitiveSearch];
+				if (asRange.location != NSNotFound) {
+					tableName = [tableName substringToIndex:asRange.location];
+				}
+
+				// Remove database prefix if present (db.table -> table)
+				NSRange dotRange = [tableName rangeOfString:@"." options:NSBackwardsSearch];
+				if (dotRange.location != NSNotFound) {
+					tableName = [tableName substringFromIndex:dotRange.location + 1];
+				}
+
+				if ([tableName length] > 0) {
+					[tables addObject:[tableName lowercaseString]];
+				}
+			}
+		}];
+	}
+
+	return tables;
+}
+
+/**
+ * Get the range of the current query being edited
+ */
+- (NSRange)getCurrentQueryRange
+{
+	NSString *text = [self string];
+	NSUInteger caretPos = [self selectedRange].location;
+
+	// Find the last semicolon before caret
+	NSRange lastSemicolonRange = [text rangeOfString:@";"
+											options:NSBackwardsSearch
+											  range:NSMakeRange(0, caretPos)];
+
+	// Find the next semicolon after caret
+	NSRange nextSemicolonRange = [text rangeOfString:@";"
+											options:0
+											  range:NSMakeRange(caretPos, [text length] - caretPos)];
+
+	NSUInteger start = (lastSemicolonRange.location != NSNotFound) ?
+		lastSemicolonRange.location + 1 : 0;
+	NSUInteger end = (nextSemicolonRange.location != NSNotFound) ?
+		nextSemicolonRange.location : [text length];
+
+	if (start >= end) return NSMakeRange(NSNotFound, 0);
+
+	return NSMakeRange(start, end - start);
+}
+
+/**
  * Returns the associated line number for a character position inside of the SPTextView
  */
 - (NSUInteger) getLineNumberForCharacterIndex:(NSUInteger)anIndex
@@ -991,7 +1099,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 	// Perform bounds checking
 	if (caretPosition >= [[self string] length]) return NO;
-	
+
 	// Perform the check
 	if ([[[self textStorage] attribute:attribute atIndex:caretPosition effectiveRange:nil] isEqualToString:aValue])
 		return YES;
@@ -1013,7 +1121,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	NSUInteger bufferLength = [[self string] length];
 
 	if(!bufferLength) return NO;
-	
+
 	// Check previous/next character for being alphanum
 	// @try block for bounds checking
 	@try
@@ -1028,7 +1136,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			rightIsAlphanum = NO;
 		else
 			rightIsAlphanum= [alphanum characterIsMember:[[self string] characterAtIndex:caretPosition]];
-		
+
 	} @catch(id ae) { }
 
 	return (leftIsAlphanum ^ rightIsAlphanum || (leftIsAlphanum && rightIsAlphanum));
@@ -1290,7 +1398,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	// Otherwise, something is selected
 	NSRange firstLineRange = [textViewString lineRangeForRange:NSMakeRange(selectedRange.location,0)];
 	NSUInteger lastLineMaxRange = NSMaxRange([textViewString lineRangeForRange:NSMakeRange(NSMaxRange(selectedRange)-1,0)]);
-	
+
 	// Expand selection for first and last line to begin and end resp. but not the last line ending
 	NSRange blockRange = NSMakeRange(firstLineRange.location, lastLineMaxRange - firstLineRange.location);
 	if([textViewString characterAtIndex:NSMaxRange(blockRange)-1] == '\n' || [textViewString characterAtIndex:NSMaxRange(blockRange)-1] == '\r')
@@ -1377,7 +1485,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	// Otherwise, something is selected
 	NSRange firstLineRange = [textViewString lineRangeForRange:NSMakeRange([self selectedRange].location,0)];
 	NSUInteger lastLineMaxRange = NSMaxRange([textViewString lineRangeForRange:NSMakeRange(NSMaxRange([self selectedRange])-1,0)]);
-	
+
 	// Expand selection for first and last line to begin and end resp. but the last line ending
 	NSRange blockRange = NSMakeRange(firstLineRange.location, lastLineMaxRange - firstLineRange.location);
 	if([textViewString characterAtIndex:NSMaxRange(blockRange)-1] == '\n' || [textViewString characterAtIndex:NSMaxRange(blockRange)-1] == '\r')
@@ -1683,7 +1791,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 		isProcessingMirroredSnippets = NO;
 		[self didChangeText];
-		
+
 	}
 }
 
@@ -1725,7 +1833,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 				if(r1.location == r2.location && r1.length == r2.length) {
 					[self setSelectedRange:r2];
 					NSString *snip = [[self string] substringWithRange:r2];
-					
+
 					if([snip length] > 2 && [snip hasPrefix:@"¦"] && [snip hasSuffix:@"¦"]) {
 						BOOL fuzzySearchMode = ([snip hasPrefix:@"¦¦"] && [snip hasSuffix:@"¦¦"]) ? YES : NO;
 						NSInteger offset = (fuzzySearchMode) ? 2 : 1;
@@ -1861,13 +1969,13 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 				while ([theHintString isMatchedByRegex:@"(?<!\\\\)\\$SP_SELECTED_TABLES"])
 				{
 					r = [theHintString rangeOfRegex:@"(?<!\\\\)\\$SP_SELECTED_TABLES"];
-					
+
 					if (r.length) {
 						NSArray *selTables = [tablesListInstance selectedTableAndViewNames];
-						
+
 						[theHintString replaceCharactersInRange:r withString:[selTables count] ? [selTables componentsJoinedAndBacktickQuoted] : @"\\$SP_SELECTED_TABLE"];
 					}
-					
+
 					[theHintString flushCachedRegexData];
 				}
 
@@ -2070,7 +2178,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		[self endSnippetSession];
 		return NO;
 	}
-	
+
 	[[self textStorage] ensureAttributesAreFixedInRange:[self selectedRange]];
 	NSInteger caretPos = [self selectedRange].location;
 	NSInteger i, j;
@@ -2189,7 +2297,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 												   object:nil];
 
 	NSEventModifierFlags allFlags = (NSEventModifierFlagShift|NSEventModifierFlagControl|NSEventModifierFlagOption|NSEventModifierFlagCommand);
-	
+
 	// Check if user pressed ⌥ to allow composing of accented characters.
 	// e.g. for US keyboard "⌥u a" to insert ä
 	// or for non-US keyboards to allow to enter dead keys
@@ -2283,10 +2391,13 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			}
 		}
 
-		// Check for TAB as indention for current line, i.e. left of the caret there are only white spaces
-		// but only if Soft Indent is set
-		if([prefs boolForKey:SPCustomQuerySoftIndent] && [self isCaretAtIndentPositionIgnoreLineStart:YES]) {
-			if([self shiftSelectionRight]) return;
+		// Check for TAB/SHIFT+TAB as indention (or undention) for current line (or selected block) for both hard/soft indents
+		if ([self isCaretAtIndentPositionIgnoreLineStart:YES]) {
+		    if ([theEvent modifierFlags] & NSEventModifierFlagShift) {
+                if([self shiftSelectionLeft]) return;
+            } else {
+                if([self shiftSelectionRight]) return;
+            }
 		}
 	}
 
@@ -2419,10 +2530,10 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 			// the auto-paired characters.  This returns false if the selection has zero length.
 			if ([self wrapSelectionWithPrefix:characters suffix:matchingCharacter])
 				return;
-			
+
 			// Otherwise, start by inserting the original character - the first half of the autopair.
 			[super keyDown:theEvent];
-			
+
 			// Then process the second half of the autopair - the matching character.
 			currentRange = [self selectedRange];
 			if (currentRange.location != NSNotFound) {
@@ -2439,13 +2550,13 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 				// Restore the original selection.
 				currentRange.length=0;
 				[self setSelectedRange:currentRange];
-				
+
 				[self didChangeText];
 			}
 			return;
 		}
 	}
-	
+
 	// break down the undo grouping level for better undo behavior
 	[self breakUndoCoalescing];
 	// The default action is to perform the normal key-down action.
@@ -2883,12 +2994,12 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	// NO if lexer doesn't find a token to suppress auto-uppercasing
 	// and continue earlier.
 	BOOL allowToCheckForUpperCase;
-	
+
 	// now loop through all the tokens
 	while ((token=yylex())) {
 
 		allowToCheckForUpperCase = YES;
-		
+
 		switch (token) {
 			case SPT_SINGLE_QUOTED_TEXT:
 			case SPT_DOUBLE_QUOTED_TEXT:
@@ -2957,14 +3068,14 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 
 		NSMutableDictionary *attributes = [[NSMutableDictionary alloc] init];
 		[attributes setValue:tokenColor forKey:NSForegroundColorAttributeName];
-		
+
 		// Add an attribute to be used in the auto-pairing (keyDown:)
 		// to disable auto-pairing if caret is inside of any token found by lex.
 		// For discussion: maybe change it later (only for quotes not keywords?)
 		if (!allowToCheckForUpperCase && token < 6) {
 			[attributes setValue:kLEXTokenValue forKey:kLEXToken];
 		}
-		
+
 		// Mark each SQL keyword for auto-uppercasing and do it for the next textStorageDidProcessEditing: event.
 		// Performing it one token later allows words which start as reserved keywords to be entered.
 		if (token == SPT_RESERVED_WORD) {
@@ -3155,8 +3266,8 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 /**
  * Add a menu item to context menu for looking up mysql documentation.
  */
-- (NSMenu *)menuForEvent:(NSEvent *)event 
-{	
+- (NSMenu *)menuForEvent:(NSEvent *)event
+{
 	// Set title of the menu item
 	if([self selectedRange].length)
 		showMySQLHelpFor = NSLocalizedString(@"MySQL Help for Selection", @"MySQL Help for Selection");
@@ -3169,7 +3280,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	// - Select Active Query
 	// if it doesn't yet exist
 	NSMenu *menu = [[self class] defaultMenu];
-	
+
 	if ([[[self class] defaultMenu] itemWithTag:SP_CQ_SEARCH_IN_MYSQL_HELP_MENU_ITEM_TAG] == nil)
 	{
 		[menu insertItem:[NSMenuItem separatorItem] atIndex:3];
@@ -3194,7 +3305,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 	}
 	// Hide "Select Active Query" if self is not editable
 	[[menu itemAtIndex:4] setHidden:![self isEditable]];
-	
+
 	if(customQueryInstance) {
 		[[menu itemAtIndex:5] setHidden:NO];
 		[[menu itemAtIndex:6] setHidden:NO];
@@ -3274,7 +3385,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
  * Menu validation
  * Disable the search in the MySQL help function when getRangeForCurrentWord returns zero length.
  */
-- (BOOL)validateMenuItem:(NSMenuItem *)menuItem 
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem
 {
 	// Enable or disable the search in the MySQL help menu item depending on whether there is a
 	// selection and whether it is a reasonable length.
@@ -3503,7 +3614,7 @@ static inline NSPoint SPPointOnLine(NSPoint a, NSPoint b, CGFloat t) { return NS
 		}
 		return YES;
 	}
-	
+
 	// Insert selected items coming from the Navigator
 	if ( [[pboard types] containsObject:SPNavigatorPasteboardDragType] ) {
 		NSPoint draggingLocation = [sender draggingLocation];

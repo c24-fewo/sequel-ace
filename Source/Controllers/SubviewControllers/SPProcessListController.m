@@ -42,6 +42,7 @@
 static NSString *SPKillProcessQueryMode        = @"SPKillProcessQueryMode";
 static NSString *SPKillProcessConnectionMode   = @"SPKillProcessConnectionMode";
 static NSString *SPTableViewIDColumnIdentifier = @"Id";
+static NSString *SPTableViewProgressColumnIdentifier = @"Progress";
 
 static NSString * const SPKillModeKey = @"SPKillMode";
 static NSString * const SPKillIdKey   = @"SPKillId";
@@ -99,12 +100,13 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 	
 	// Show/hide table columns
 	[[processListTableView tableColumnWithIdentifier:SPTableViewIDColumnIdentifier] setHidden:![prefs boolForKey:SPProcessListShowProcessID]];
+  [[processListTableView tableColumnWithIdentifier:SPTableViewProgressColumnIdentifier] setHidden:![connection isMariaDB]];
 	
 	// Set the process table view's vertical gridlines if required
 	[processListTableView setGridStyleMask:([prefs boolForKey:SPDisplayTableViewVerticalGridlines]) ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
 
 	NSFont *tableFont = [NSUserDefaults getFont];
-	[processListTableView setRowHeight:2.0f+NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
+	[processListTableView setRowHeight:4.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
 
 	for (NSTableColumn *column in [processListTableView tableColumns])
 	{
@@ -151,15 +153,16 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 			if (i < [processesFiltered count]) {
 				NSDictionary *process = [processesFiltered safeObjectAtIndex:i];
 				
-				NSString *stringTmp = [NSString stringWithFormat:@"%@ %@ %@ %@ %@ %@ %@ %@",
-									   [process objectForKey:@"Id"],
-									   [process objectForKey:@"User"],
-									   [process objectForKey:@"Host"],
-									   [process objectForKey:@"db"],
-									   [process objectForKey:@"Command"],
-									   [process objectForKey:@"Time"],
-									   [process objectForKey:@"State"],
-									   [process objectForKey:@"Info"]];
+				NSString *stringTmp = [NSString stringWithFormat:@"%@ %@ %@ %@ %@ %@ %@ %@ %@",
+                               [process objectForKey:@"Id"],
+                               [process objectForKey:@"User"],
+                               [process objectForKey:@"Host"],
+                               [process objectForKey:@"db"],
+                               [process objectForKey:@"Command"],
+                               [process objectForKey:@"Time"],
+                               [process objectForKey:@"State"],
+                               [process objectForKey:@"Info"],
+                               [process objectForKey:@"Progress"]];
 				
 				[string appendString:stringTmp];
 				[string appendString:@"\n"];
@@ -244,7 +247,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
                 
                 for (NSDictionary *process in self->processesFiltered)
                 {
-                    NSString *stringTmp = [NSString stringWithFormat:@"%@ %@ %@ %@ %@ %@ %@ %@",
+                    NSString *stringTmp = [NSString stringWithFormat:@"%@ %@ %@ %@ %@ %@ %@ %@ %@",
                                            [process objectForKey:@"Id"],
                                            [process objectForKey:@"User"],
                                            [process objectForKey:@"Host"],
@@ -252,7 +255,8 @@ static NSString * const SPKillIdKey   = @"SPKillId";
                                            [process objectForKey:@"Command"],
                                            [process objectForKey:@"Time"],
                                            [process objectForKey:@"State"],
-                                           [process objectForKey:@"Info"]];
+                                           [process objectForKey:@"Info"],
+                                           [process objectForKey:@"Progress"]];
                     
                     [processesString appendString:stringTmp];
                     [processesString appendString:@"\n"];
@@ -404,7 +408,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 	else if ([keyPath isEqualToString:SPGlobalFontSettings]) {
 		NSFont *tableFont = [NSUserDefaults getFont];
 
-		[processListTableView setRowHeight:2.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
+		[processListTableView setRowHeight:4.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
 		[processListTableView setFont:tableFont];
 		[processListTableView reloadData];
 	}
@@ -679,6 +683,8 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 	// Perform filtering
 	for (NSDictionary *process in processes) 
 	{
+    BOOL isProcessColumnHidden = [processListTableView tableColumnWithIdentifier:SPTableViewProgressColumnIdentifier].isHidden;
+    
 		if (([[[process objectForKey:@"Id"] stringValue] rangeOfString:filterString options:NSCaseInsensitiveSearch].location != NSNotFound) ||
 			([[process objectForKey:@"User"] rangeOfString:filterString options:NSCaseInsensitiveSearch].location != NSNotFound) ||
 			([[process objectForKey:@"Host"] rangeOfString:filterString options:NSCaseInsensitiveSearch].location != NSNotFound) ||
@@ -686,7 +692,8 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 			([[process objectForKey:@"Command"] rangeOfString:filterString options:NSCaseInsensitiveSearch].location != NSNotFound) ||
 			((![[process objectForKey:@"Time"] isNSNull]) && ([[[process objectForKey:@"Time"] stringValue] rangeOfString:filterString options:NSCaseInsensitiveSearch].location != NSNotFound)) ||
 			((![[process objectForKey:@"State"] isNSNull]) && ([[process objectForKey:@"State"] rangeOfString:filterString options:NSCaseInsensitiveSearch].location != NSNotFound)) ||
-			((![[process objectForKey:@"Info"] isNSNull]) && ([[process objectForKey:@"Info"] rangeOfString:filterString options:NSCaseInsensitiveSearch].location != NSNotFound)))
+			((![[process objectForKey:@"Info"] isNSNull]) && ([[process objectForKey:@"Info"] rangeOfString:filterString options:NSCaseInsensitiveSearch].location != NSNotFound)) ||
+      (!isProcessColumnHidden && (![[process objectForKey:@"Progress"] isNSNull]) && ([[process objectForKey:@"Progress"] rangeOfString:filterString options:NSCaseInsensitiveSearch].location != NSNotFound)))
 		{
 			[processesFiltered addObject:process];
 		}
