@@ -35,8 +35,15 @@
 
 #import <SPMySQL/SPMySQL.h>
 
-@class SPDatabaseDocument, 
-	   SPFavoritesController, 
+@protocol SADatabaseDocumentProviding;
+@protocol SAConnectionDelegate;
+@protocol SAFavoritesListDelegate;
+@class SAConnectionViewCoordinator;
+@class SAFavoritesListDataSource;
+@class SAConnectionService;
+
+@class SPDatabaseDocument,
+	   SPFavoritesController,
 	   SPSSHTunnel,
 	   SPTreeNode,
 	   SPFavoritesOutlineView,
@@ -54,9 +61,9 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
     SPConnectionTimeZoneModeUseFixedTZ
 };
 
-@interface SPConnectionController : NSViewController <SPMySQLConnectionDelegate, NSOpenSavePanelDelegate, SPFavoritesImportProtocol, SPFavoritesExportProtocol, NSSplitViewDelegate>
-{	
-	__weak SPDatabaseDocument *dbDocument;
+@interface SPConnectionController : NSViewController <SPMySQLConnectionDelegate, NSOpenSavePanelDelegate, SPFavoritesImportProtocol, SPFavoritesExportProtocol, NSSplitViewDelegate, SAFavoritesListDelegate>
+{
+	__weak id dbDocument;
 	SPMySQLConnection *mySQLConnection;
 
 	SPKeychain *keychain;
@@ -69,6 +76,7 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 	BOOL isConnecting;
 	BOOL isEditingConnection;
 	BOOL isTestingConnection;
+	NSUInteger connectionAttemptID;
 	
 	// Standard details
 	NSInteger previousType;
@@ -92,7 +100,20 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 	
 	// Clear text plugin
 	NSInteger enableClearTextPlugin;
-	
+
+	// AWS IAM Authentication (profile-based only)
+	NSInteger useAWSIAMAuth;
+	NSString *awsRegion;
+	NSString *awsProfile;
+	NSArray<NSString *> *awsAvailableRegionValues;
+
+	// Vault Authentication
+	NSString *vaultHost;
+	NSString *vaultPort;
+	NSString *vaultOIDCMount;
+	NSString *vaultCredentialsPath;
+	NSString *vaultLoginIdentifier;
+
 	// SSL details
 	NSInteger useSSL;
 	NSInteger sslKeyFileLocationEnabled;
@@ -109,6 +130,7 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 	NSInteger sshKeyLocationEnabled;
 	NSString *sshKeyLocation;
 	NSString *sshPort;
+	NSString *sshRemoteSocketPath;
 
 	NSString *connectionKeychainID;
 	NSString *connectionKeychainItemName;
@@ -121,11 +143,14 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 	IBOutlet NSScrollView *connectionDetailsScrollView;
 	IBOutlet NSTextField *connectionInstructionsTextField;
 	IBOutlet SPFavoritesOutlineView *favoritesOutlineView;
+	IBOutlet NSSearchField *favoritesSearchField;
+	id favoritesSearchKeyMonitor;
 
 
 	IBOutlet NSView *connectionResizeContainer;
 	IBOutlet NSView *standardConnectionFormContainer;
 	IBOutlet NSView *standardConnectionSSLDetailsContainer;
+	IBOutlet NSView *awsIAMConnectionFormContainer;
 	IBOutlet NSView *socketConnectionFormContainer;
 	IBOutlet NSView *socketConnectionSSLDetailsContainer;
 	IBOutlet NSView *sshConnectionFormContainer;
@@ -134,6 +159,37 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 	IBOutlet NSView *sslKeyFileLocationHelp;
 	IBOutlet NSView *sslCertificateLocationHelp;
 	IBOutlet NSView *sslCACertLocationHelp;
+
+	// AWS IAM Authentication UI (profile-based only)
+	IBOutlet NSPopUpButton *awsProfilePopup;
+	IBOutlet NSComboBox *awsRegionComboBox;
+	IBOutlet NSButton *awsAuthorizeButton;
+	IBOutlet NSTextField *awsAuthorizeInfoLabel;
+	IBOutlet NSTextField *awsProfileLabel;
+	IBOutlet NSTextField *awsRegionLabel;
+	IBOutlet NSTextField *awsIAMNameField;
+	IBOutlet NSTextField *awsIAMSQLHostField;
+	IBOutlet NSTextField *awsIAMUserField;
+	IBOutlet NSSecureTextField *awsIAMPasswordField;
+	IBOutlet SPColorSelectorView *awsIAMColorField;
+	IBOutlet NSPopUpButton *awsIAMTimeZoneField;
+
+	// Vault Authentication UI
+	IBOutlet NSView            *vaultConnectionFormContainer;
+	IBOutlet NSView            *vaultConnectionSSLDetailsContainer;
+	IBOutlet NSTextField       *vaultNameField;
+	IBOutlet NSTextField       *vaultSQLHostField;
+	IBOutlet NSTextField       *vaultSQLPortField;
+	IBOutlet NSTextField       *vaultDatabaseField;
+	IBOutlet NSTextField       *vaultHostField;
+	IBOutlet NSTextField       *vaultPortField;
+	IBOutlet NSTextField       *vaultOIDCMountField;
+	IBOutlet NSTextField       *vaultCredentialsPathField;
+	IBOutlet NSPopUpButton     *vaultTimeZoneField;
+	IBOutlet SPColorSelectorView *vaultColorField;
+	IBOutlet NSButton          *vaultSSLKeyFileButton;
+	IBOutlet NSButton          *vaultSSLCertificateButton;
+	IBOutlet NSButton          *vaultSSLCACertButton;
 
 	IBOutlet NSTextField *standardNameField;
 	IBOutlet NSTextField *sshNameField;
@@ -200,6 +256,10 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 }
 
 @property (readwrite, weak) id <SPConnectionControllerDelegateProtocol> delegate;
+@property (readwrite, weak) id <SAConnectionDelegate> connectionDelegate;
+@property (readwrite, strong) SAConnectionViewCoordinator *viewCoordinator;
+@property (readwrite, strong) SAFavoritesListDataSource *favoritesListDataSource;
+@property (readwrite, strong) SAConnectionService *connectionService;
 @property (readwrite) NSInteger type;
 @property (readwrite, copy) NSString *name;
 @property (readwrite, copy) NSString *host;
@@ -212,6 +272,15 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 @property (readwrite, copy) NSString *timeZoneIdentifier;
 @property (readwrite) NSInteger allowDataLocalInfile;
 @property (readwrite) NSInteger enableClearTextPlugin;
+// AWS IAM Authentication (profile-based only)
+@property (readwrite) NSInteger useAWSIAMAuth;
+@property (readwrite, copy) NSString *awsRegion;
+@property (readwrite, copy) NSString *awsProfile;
+// Vault Authentication
+@property (readwrite, copy) NSString *vaultHost;
+@property (readwrite, copy) NSString *vaultPort;
+@property (readwrite, copy) NSString *vaultOIDCMount;
+@property (readwrite, copy) NSString *vaultCredentialsPath;
 @property (readwrite) NSInteger useSSL;
 @property (readwrite) NSInteger colorIndex;
 @property (readwrite) NSInteger sslKeyFileLocationEnabled;
@@ -226,6 +295,7 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 @property (readwrite) NSInteger sshKeyLocationEnabled;
 @property (readwrite, copy) NSString *sshKeyLocation;
 @property (readwrite, copy) NSString *sshPort;
+@property (readwrite, copy) NSString *sshRemoteSocketPath;
 @property (readwrite, copy) NSString *socketHelpWindowUUID;
 @property (readwrite, copy) NSString *connectionKeychainID;
 @property (readwrite, copy) NSString *connectionKeychainItemName;
@@ -240,6 +310,11 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 
 - (NSString *)keychainPassword;
 - (NSString *)keychainPasswordForSSH;
+/**
+ * Returns the password to use for an actual MySQL connect/reconnect request.
+ * For AWS IAM connections this generates a fresh token.
+ */
+- (NSString *)passwordForConnectionRequest;
 
 // Connection processes
 - (IBAction)initiateConnection:(id)sender;
@@ -252,10 +327,18 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 - (IBAction)updateSSLInterface:(id)sender;
 - (IBAction)updateKeyLocationFileVisibility:(id)sender;
 
+// AWS IAM Authentication
+- (IBAction)updateAWSIAMInterface:(id)sender;
+- (IBAction)authorizeAWSDirectory:(id)sender;
+- (NSArray<NSString *> *)awsAvailableProfiles;
+- (NSArray<NSString *> *)awsAvailableRegions;
+- (BOOL)isAWSDirectoryAuthorized;
+
 - (void)resizeTabViewToConnectionType:(NSUInteger)theType animating:(BOOL)animate;
 
 - (IBAction)sortFavorites:(id)sender;
 - (IBAction)reverseSortFavorites:(NSMenuItem *)sender;
+- (IBAction)searchFavorites:(id)sender;
 
 -(BOOL)validateCertFile:(NSURL *)url error:(NSError **)outError;
 -(BOOL)validateKeyFile:(NSURL *)url error:(NSError **)outError;
@@ -283,26 +366,21 @@ typedef NS_ENUM(NSInteger, SPConnectionTimeZoneMode) {
 // Import/export favorites
 - (IBAction)importFavorites:(id)sender;
 - (IBAction)exportFavorites:(id)sender;
+- (IBAction)copyConnectionString:(id)sender;
 
 // Accessors
 - (SPFavoritesOutlineView *)favoritesOutlineView;
 
 #pragma mark - SPConnectionHandler
 
-- (void)initiateMySQLConnection;
-- (void)initiateMySQLConnectionInBackground;
-- (void)initiateSSHTunnelConnection;
-
 - (void)mySQLConnectionEstablished;
-- (void)sshTunnelCallback:(SPSSHTunnel *)theTunnel;
-
 - (void)addConnectionToDocument;
 
 - (void)failConnectionWithTitle:(NSString *)theTitle errorMessage:(NSString *)theErrorMessage detail:(NSString *)errorDetail;
 
 #pragma mark - SPConnectionControllerInitializer
 
-- (instancetype)initWithDocument:(SPDatabaseDocument *)document;
+- (instancetype)initWithDocument:(id<SADatabaseDocumentProviding>)document;
 
 - (void)loadNib;
 - (void)registerForNotifications;

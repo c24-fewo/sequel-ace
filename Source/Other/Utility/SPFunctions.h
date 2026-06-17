@@ -28,6 +28,8 @@
 //
 //  More info at <https://github.com/sequelpro/sequelpro>
 
+#import <Foundation/Foundation.h>
+
 typedef void(^SAVoidCompletionBlock)(void);
 
 void executeOnMainThreadAfterADelay(SAVoidCompletionBlock block, double delayInSeconds);
@@ -78,6 +80,32 @@ NSInteger intSortDesc(id num1, id num2, void *context);
 
 void executeOnBackgroundThread(SAVoidCompletionBlock block);
 void executeOnBackgroundThreadSync(SAVoidCompletionBlock block);
+
+/**
+ * Returns YES when a host value appears to be in a private/local network range.
+ */
+BOOL SPIsLikelyLocalNetworkHost(NSString *host);
+
+/**
+ * Returns YES when SSH output indicates "No route to host" for a likely local-network target.
+ */
+BOOL SPSSHNoRouteToHostLikelyLocalNetworkPrivacyIssue(NSString *errorMessage, NSString *debugDetail, NSString *sshHost);
+
+/**
+ * Returns the supported query parameters for mysql:// connection URLs.
+ */
+NSArray<NSString *> *SPValidMySQLConnectionURLQueryParameters(void);
+
+/**
+ * Parse mysql:// URL connection details into the supplied dictionary.
+ *
+ * @param url The URL to parse.
+ * @param details Mutable dictionary to receive parsed values (type, host, user, etc).
+ * @param autoConnect Set to YES when URL parsing implies immediate connect behavior.
+ * @param invalidParameters Set to unsupported/invalid query parameter names when parsing fails.
+ * @return YES when parsing succeeds; NO for unsupported scheme or invalid query parameters.
+ */
+BOOL SPExtractConnectionDetailsFromMySQLURL(NSURL *url, NSMutableDictionary *details, BOOL *autoConnect, NSArray<NSString *> **invalidParameters);
 
 void SP_swizzleInstanceMethod(Class c, SEL original, SEL replacement);
 

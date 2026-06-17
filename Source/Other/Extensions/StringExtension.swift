@@ -200,9 +200,70 @@ extension String {
     }
 }
 
+@objc(SPProcessListRowSerializer)
+@objcMembers
+public class SPProcessListRowSerializer: NSObject {
+    private enum ProcessListColumnKey: String {
+        case id = "Id"
+        case user = "User"
+        case host = "Host"
+        case database = "db"
+        case command = "Command"
+        case time = "Time"
+        case state = "State"
+        case info = "Info"
+        case progress = "Progress"
+    }
+
+    @objc(serializedProcessRow:includeProgress:)
+    public class func serializedProcessRow(_ process: NSDictionary, includeProgress: Bool) -> String {
+        let typedProcess = process as? [AnyHashable: Any] ?? [:]
+
+        var rowValues = [
+            ProcessListColumnKey.id,
+            .user,
+            .host,
+            .database,
+            .command,
+            .time,
+            .state,
+            .info
+        ].map { processValue(for: $0, in: typedProcess) }
+
+        if includeProgress {
+            let progressValue = processValue(for: .progress, in: typedProcess)
+            if !progressValue.isEmpty {
+                rowValues.append(progressValue)
+            }
+        }
+
+        return rowValues.joined(separator: " ")
+    }
+
+    private class func processValue(
+        for key: ProcessListColumnKey,
+        in process: [AnyHashable: Any]
+    ) -> String {
+        guard let rawValue = process[key.rawValue], !(rawValue is NSNull) else {
+            return ""
+        }
+
+        return String(describing: rawValue)
+    }
+}
+
 @objc extension NSString {
     //Special space-character used to separate the column name and column type
     @objc static let columnHeaderSplittingSpace: String = " "
+
+    @objc(tableContentColumnHeaderStringForColumnName:columnType:columnTypesVisible:)
+    static func tableContentColumnHeaderString(columnName: String, columnType: String?, columnTypesVisible: Bool) -> String {
+        guard columnTypesVisible, let columnType, !columnType.isEmpty else {
+            return columnName
+        }
+
+        return "\(columnName)\(columnHeaderSplittingSpace)\(columnType)"
+    }
 
     static func rawByteString(data: NSData) -> NSString {
         return String.rawByteString(data as Data) as NSString
@@ -284,6 +345,285 @@ extension String {
             let date = Date(timeIntervalSince1970: timeInterval)
             let formatter = DateFormatter.iso8601DateFormatter
             return formatter.string(from: date) as NSString
+        }
+        return nil
+    }
+}
+
+@objcMembers final class SPOptimizedFieldTypeEstimator: NSObject {
+
+    private static let integerFieldTypes: Set<String> = [
+        "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT"
+    ]
+    private static let binaryFieldTypes: Set<String> = [
+        "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"
+    ]
+    private static let stringFieldTypes: Set<String> = [
+        "CHAR", "VARCHAR", "NCHAR", "NVARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT"
+    ]
+
+    @objc(normalizedFieldTypeFromDefinition:)
+    static func normalizedFieldType(fromDefinition fieldDefinition: NSDictionary) -> String {
+        guard let rawType = fieldDefinition["type"], !(rawType is NSNull) else { return "" }
+        let fieldType = String(describing: rawType).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !fieldType.isEmpty else { return "" }
+        let uppercasedType = fieldType.uppercased()
+        if let suffixStart = uppercasedType.firstIndex(of: "(") {
+            return String(uppercasedType[..<suffixStart]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return uppercasedType.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @objc(isIntegerFieldType:)
+    static func isIntegerFieldType(_ fieldType: String?) -> Bool {
+        guard let fieldType = fieldType else { return false }
+        return integerFieldTypes.contains(fieldType)
+    }
+
+    @objc(isBinaryFieldType:)
+    static func isBinaryFieldType(_ fieldType: String?) -> Bool {
+        guard let fieldType = fieldType else { return false }
+        return binaryFieldTypes.contains(fieldType)
+    }
+
+    @objc(isStringFieldType:)
+    static func isStringFieldType(_ fieldType: String?) -> Bool {
+        guard let fieldType = fieldType else { return false }
+        return stringFieldTypes.contains(fieldType)
+    }
+
+    @objc(decimalNumberFromStatValue:)
+    static func decimalNumber(fromStatValue value: Any?) -> NSDecimalNumber? {
+        guard let value = value, !(value is NSNull) else { return nil }
+        let numberString = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !numberString.isEmpty else { return nil }
+        let number = NSDecimalNumber(string: numberString)
+        if number == NSDecimalNumber.notANumber {
+            return nil
+        }
+        return number
+    }
+
+    @objc(unsignedIntegerValueFromStatValue:)
+    static func unsignedIntegerValue(fromStatValue value: Any?) -> UInt {
+        guard let value = value, !(value is NSNull) else { return 0 }
+        let numberString = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !numberString.isEmpty else { return 0 }
+        let parsedValue = max(Int64(numberString) ?? 0, 0)
+        return UInt(parsedValue)
+    }
+
+    @objc(maxBytesPerCharacterForFieldDefinition:tableEncoding:availableEncodings:)
+    static func maxBytesPerCharacter(
+        forFieldDefinition fieldDefinition: NSDictionary,
+        tableEncoding: String?,
+        availableEncodings: [NSDictionary]
+    ) -> UInt {
+        var encodingName = (fieldDefinition["encodingName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if encodingName.isEmpty {
+            encodingName = (fieldDefinition["encoding"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+        if encodingName.isEmpty {
+            encodingName = tableEncoding?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+        guard !encodingName.isEmpty else { return 1 }
+
+        for encoding in availableEncodings {
+            var characterSetName = (encoding["CHARACTER_SET_NAME"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if characterSetName.isEmpty {
+                characterSetName = (encoding["Charset"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            }
+            guard !characterSetName.isEmpty else { continue }
+            guard characterSetName.caseInsensitiveCompare(encodingName) == .orderedSame else { continue }
+
+            var maxBytes = unsignedIntegerValue(fromStatValue: encoding["MAXLEN"])
+            if maxBytes == 0 {
+                maxBytes = unsignedIntegerValue(fromStatValue: encoding["Maxlen"])
+            }
+            return max(maxBytes, 1)
+        }
+
+        let lowercaseEncoding = encodingName.lowercased()
+        if lowercaseEncoding.hasPrefix("utf8mb4") || lowercaseEncoding.hasPrefix("utf16") || lowercaseEncoding.hasPrefix("utf32") {
+            return 4
+        }
+        if lowercaseEncoding.hasPrefix("utf8") {
+            return 3
+        }
+        if lowercaseEncoding.hasPrefix("ucs2") {
+            return 2
+        }
+        return 1
+    }
+
+    @objc(estimatedIntegerTypeForMinimum:maximum:)
+    static func estimatedIntegerType(forMinimum minimum: NSDecimalNumber, maximum: NSDecimalNumber) -> String {
+        struct IntegerRange {
+            let type: String
+            let signedMin: String
+            let signedMax: String
+            let unsignedMax: String
+        }
+
+        let ranges: [IntegerRange] = [
+            IntegerRange(type: "TINYINT", signedMin: "-128", signedMax: "127", unsignedMax: "255"),
+            IntegerRange(type: "SMALLINT", signedMin: "-32768", signedMax: "32767", unsignedMax: "65535"),
+            IntegerRange(type: "MEDIUMINT", signedMin: "-8388608", signedMax: "8388607", unsignedMax: "16777215"),
+            IntegerRange(type: "INT", signedMin: "-2147483648", signedMax: "2147483647", unsignedMax: "4294967295"),
+            IntegerRange(type: "BIGINT", signedMin: "-9223372036854775808", signedMax: "9223372036854775807", unsignedMax: "18446744073709551615")
+        ]
+
+        let canUseUnsigned = minimum.compare(NSDecimalNumber.zero) != .orderedAscending
+
+        for range in ranges {
+            if canUseUnsigned {
+                let unsignedMax = NSDecimalNumber(string: range.unsignedMax)
+                if maximum.compare(unsignedMax) != .orderedDescending {
+                    return "\(range.type) UNSIGNED"
+                }
+            } else {
+                let signedMin = NSDecimalNumber(string: range.signedMin)
+                let signedMax = NSDecimalNumber(string: range.signedMax)
+                if minimum.compare(signedMin) != .orderedAscending && maximum.compare(signedMax) != .orderedDescending {
+                    return range.type
+                }
+            }
+        }
+
+        return canUseUnsigned ? "BIGINT UNSIGNED" : "BIGINT"
+    }
+}
+
+@objcMembers public final class SPFieldTypeClassifier: NSObject {
+    private enum FieldTypeGroup: String {
+        case bit
+        case integer
+        case float
+    }
+
+    private static let unquotedFieldTypes: Set<String> = [
+        "BIT",
+        "TINYINT",
+        "SMALLINT",
+        "MEDIUMINT",
+        "INT",
+        "INTEGER",
+        "BIGINT",
+        "FLOAT",
+        "DOUBLE",
+        "REAL",
+        "DECIMAL",
+        "DEC",
+        "NUMERIC",
+        "FIXED"
+    ]
+
+    @objc(shouldBeUnquotedWithFieldTypeGroup:fieldType:)
+    public class func shouldBeUnquoted(fieldTypeGroup: String?, fieldType: String?) -> Bool {
+        if let normalizedGroup = fieldTypeGroup?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           FieldTypeGroup(rawValue: normalizedGroup) != nil {
+            return true
+        }
+
+        guard let fieldType else { return false }
+
+        let normalizedFieldType = fieldType.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedFieldType.isEmpty else { return false }
+
+        let baseType = normalizedFieldType.split(separator: "(", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        guard let typeToken = baseType.split(whereSeparator: \.isWhitespace).first else { return false }
+
+        return unquotedFieldTypes.contains(typeToken.uppercased())
+    }
+}
+
+@objcMembers public final class SPTableLoadFailure: NSObject {
+    public let tableName: String
+    public let databaseName: String
+    public let loadTableType: Int
+
+    private init(tableName: String, databaseName: String, tableType: Int) {
+        self.tableName = tableName
+        self.databaseName = databaseName
+        self.loadTableType = tableType
+        super.init()
+    }
+
+    @objc(failureWithTableName:database:tableType:)
+    public class func failure(withTableName tableName: String?, database: String?, tableType: Int) -> SPTableLoadFailure {
+        return SPTableLoadFailure(
+            tableName: tableName ?? "",
+            databaseName: database ?? "",
+            tableType: tableType
+        )
+    }
+
+    @objc(matchesTableName:database:tableType:)
+    public func matches(tableName: String?, database: String?, tableType: Int) -> Bool {
+        return self.loadTableType == tableType
+            && self.tableName == (tableName ?? "")
+            && self.databaseName == (database ?? "")
+    }
+}
+
+@objcMembers public final class SPCharacterSetMetadataNormalizer: NSObject {
+    private static let charsetNameKeys = ["CHARACTER_SET_NAME", "character_set_name", "Charset", "charset"]
+    private static let descriptionKeys = ["DESCRIPTION", "Description", "description"]
+    private static let defaultCollationKeys = ["DEFAULT_COLLATE_NAME", "default_collate_name", "Default collation", "Default Collation"]
+    private static let maxLengthKeys = ["MAXLEN", "Maxlen", "maxlen"]
+
+    @objc(normalizedCharacterSetEncodingsFromRows:)
+    public class func normalizedCharacterSetEncodings(fromRows rows: [NSDictionary]) -> [NSDictionary] {
+        guard !rows.isEmpty else { return [] }
+
+        var normalizedRows: [NSDictionary] = []
+        var seenCharsetNames = Set<String>()
+
+        for row in rows {
+            guard let charsetName = firstNonEmptyString(in: row, keys: charsetNameKeys),
+                  !seenCharsetNames.contains(charsetName) else {
+                continue
+            }
+
+            let description = firstNonEmptyString(in: row, keys: descriptionKeys) ?? ""
+            let defaultCollationName = firstNonEmptyString(in: row, keys: defaultCollationKeys)
+            let maxLength = firstNonEmptyString(in: row, keys: maxLengthKeys)
+
+            var normalizedRow: [String: String] = [
+                "CHARACTER_SET_NAME": charsetName,
+                "DESCRIPTION": description
+            ]
+
+            if let defaultCollationName {
+                normalizedRow["DEFAULT_COLLATE_NAME"] = defaultCollationName
+            }
+            if let maxLength {
+                normalizedRow["MAXLEN"] = maxLength
+            }
+
+            seenCharsetNames.insert(charsetName)
+            normalizedRows.append(normalizedRow as NSDictionary)
+        }
+
+        return normalizedRows
+    }
+
+    @objc(fallbackCharacterSetEncodings)
+    public class func fallbackCharacterSetEncodings() -> [NSDictionary] {
+        return [
+            ["CHARACTER_SET_NAME": "utf8mb4", "DESCRIPTION": "UTF-8 Unicode", "DEFAULT_COLLATE_NAME": "utf8mb4_general_ci", "MAXLEN": "4"],
+            ["CHARACTER_SET_NAME": "utf8", "DESCRIPTION": "UTF-8 Unicode (BMP only)", "DEFAULT_COLLATE_NAME": "utf8_general_ci", "MAXLEN": "3"],
+            ["CHARACTER_SET_NAME": "latin1", "DESCRIPTION": "cp1252 West European", "DEFAULT_COLLATE_NAME": "latin1_swedish_ci", "MAXLEN": "1"]
+        ] as [NSDictionary]
+    }
+
+    private class func firstNonEmptyString(in row: NSDictionary, keys: [String]) -> String? {
+        for key in keys {
+            guard let value = row[key] else { continue }
+            let stringValue = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !stringValue.isEmpty {
+                return stringValue
+            }
         }
         return nil
     }

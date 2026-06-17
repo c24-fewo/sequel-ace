@@ -30,15 +30,14 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPAppController.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "SPDatabaseDocument.h"
 #import "SPPreferenceController.h"
-#import "SPAboutController.h"
 #import "SPDataImport.h"
 #import "SPEncodingPopupAccessory.h"
 #import "SPPreferencesUpgrade.h"
 #import "SPBundleEditorController.h"
 #import "SPTooltip.h"
-#import "SPBundleHTMLOutputController.h"
 #import "SPChooseMenuItemDialog.h"
 #import "SPCustomQuery.h"
 #import "SPFavoritesController.h"
@@ -57,9 +56,9 @@
 
 #import "sequel-ace-Swift.h"
 
-@import AppCenter;
-@import AppCenterAnalytics;
-@import AppCenterCrashes;
+@import FirebaseCore;
+@import FirebaseAnalytics;
+@import FirebaseCrashlytics;
 
 static const double SPDelayBeforeCheckingForNewReleases = 10;
 
@@ -203,34 +202,12 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
  */
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
 
+    [FIRApp configure];
+
     NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-    @try {
-        if ([prefs boolForKey:SPSaveApplicationUsageAnalytics]) {
-            // Send time interval for non-critical logs
-            // must set before calling AppCenter.start
-            // 5 mins?
-            [MSACAnalytics setTransmissionInterval:60*5];
-
-            // Use 30 MB for storage for logs
-            [MSACAppCenter setMaxStorageSize:(30 * 1024 * 1024) completionHandler:nil];
-            [MSACAppCenter start:@"65535bfb-1763-40fd-896b-a3aaae06227f" withServices:@[[MSACAnalytics class], [MSACCrashes class]]];
-
-#ifdef DEBUG
-            // default is 5 = MSACLogLevelWarning
-            [MSACAppCenter setLogLevel:MSACLogLevelDebug];
-#endif
-
-            if(MSACAppCenter.isEnabled == YES && MSACAppCenter.isConfigured == YES){
-                SPLog(@"Started MSACAppCenter. sdkVersion: %@. defaultLogLevel: %lu", MSACAppCenter.sdkVersion, (unsigned long) MSACAppCenter.logLevel);
-            }
-            else{
-                SPLog(@"MSACAppCenter FAILED to start.");
-            }
-        }
-    }
-    @catch (NSException * e) {
-        SPLog(@"MSACAppCenter Exception on Init: %@", e);
-    }
+    BOOL analyticsEnabled = [prefs boolForKey:SPSaveApplicationUsageAnalytics];
+    [FIRAnalytics setAnalyticsCollectionEnabled:analyticsEnabled];
+    [[FIRCrashlytics crashlytics] setCrashlyticsCollectionEnabled:analyticsEnabled];
 
 
     // this reRequests access to all bookmarks
@@ -315,6 +292,11 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
             [newWindowController.databaseDocument connect];
         }
     }
+
+    // Note: standalone connection window (SAConnectionWindowController) is available
+    // programmatically but not yet exposed in the menu to avoid confusion with the
+    // existing "New Connection Window" XIB menu item. Menu item can be added once
+    // the standalone window fully replaces the embedded connection flow.
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
@@ -541,7 +523,7 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
  */
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
     SEL action = [menuItem action];
-    if (action == @selector(newWindow:) || action == @selector(openConnectionSheet:)) {
+    if (action == @selector(newWindow:) || action == @selector(openConnectionSheet:) || action == @selector(openStandaloneConnectionWindow:)) {
         return YES;
     }
     if (action == @selector(newTab:)) {
@@ -613,7 +595,7 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
     // it will enabled if user selects a *.sql file
     [encodingPopUp setEnabled:NO];
 
-    [panel setAllowedFileTypes:@[SPFileExtensionDefault, SPFileExtensionSQL, SPBundleFileExtension]];
+    [panel setAllowedContentTypes:@[[UTType typeWithFilenameExtension:SPFileExtensionDefault], [UTType typeWithFilenameExtension:SPFileExtensionSQL], [UTType typeWithFilenameExtension:SPBundleFileExtension]]];
 
     // Check if at least one document exists, if so show a sheet
     if ([self.tabManager activeWindowController]) {
@@ -920,71 +902,33 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
 }
 
 - (void)handleMySQLConnectWithURL:(NSURL *)url {
-    if(![[url scheme] isEqualToString:@"mysql"]) {
-        SPLog(@"unsupported url scheme: %@",url);
+    // Parse connection string using Swift helper
+    ConnectionStringParseResult *result = [ConnectionStringParser parse:url];
+    NSMutableDictionary *details = [result.details mutableCopy];
+    BOOL connect = result.autoConnect;
+    NSArray<NSString *> *invalidParameters = result.invalidParameters;
+    BOOL parsed = result.success;
+
+    if (!parsed) {
+        if ([invalidParameters count] > 0) {
+            NSArray<NSString *> *validParameters = [ConnectionStringParser validQueryParameters];
+            NSBeep();
+            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"sequelace URL Scheme Error", @"sequelace url Scheme Error")
+                                         message:[NSString stringWithFormat:@"%@:\n\n%@: %@\n\n%@: %@",
+                                                  NSLocalizedString(@"Error for", @"error for message"),
+                                                  NSLocalizedString(@"Invalid query parameters given", @"Invalid query parameters given"),
+                                                  [invalidParameters componentsJoinedByString:@", "],
+                                                  NSLocalizedString(@"Allowed query parameters are", @"Allowed query parameters are"),
+                                                  [validParameters componentsJoinedByString:@", "]]
+                                        callback:nil];
+        } else {
+            SPLog(@"unsupported url scheme: %@", url);
+        }
         return;
     }
 
-    NSMutableDictionary *details = [NSMutableDictionary dictionary];
-
-    NSValue *connect = @NO;
-
-    if ([url query]) {
-        NSArray *valid = @[@"ssh_host", @"ssh_port", @"ssh_user", @"ssh_password", @"ssh_keyLocation", @"ssh_keyLocationEnabled"];
-        NSMutableArray *invalid = [NSMutableArray array];
-        NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
-        for (NSURLQueryItem *queryItem in [components queryItems]) {
-            if ([valid containsObject:queryItem.name]) {
-                NSString *decodedQueryItem = [queryItem.value stringByRemovingPercentEncoding];
-                [details setObject:decodedQueryItem forKey:queryItem.name];
-            }
-            else {
-                [invalid addObject:queryItem.name];
-            }
-        }
-        if ([invalid count] > 0) {
-            NSBeep();
-            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"sequelace URL Scheme Error", @"sequelace url Scheme Error") message:[NSString stringWithFormat:@"%@:\n\n%@: %@\n\n%@: %@", NSLocalizedString(@"Error for", @"error for message"), NSLocalizedString(@"Invalid query parameters given", @"Invalid query parameters given"), [invalid componentsJoinedByString:@", "], NSLocalizedString(@"Allowed query parameters are", @"Allowed query parameters are"), [valid componentsJoinedByString:@", "]] callback:nil];
-            return;
-        }
-    }
-
-    if ([details objectForKey:@"ssh_host"]) {
-        [details setObject:@"SPSSHTunnelConnection" forKey:@"type"];
-    }
-    else {
-        [details setObject:@"SPTCPIPConnection" forKey:@"type"];
-    }
-
-    if ([url port]) {
-        [details setObject:[url port] forKey:@"port"];
-    }
-
-    if ([url user]) {
-        NSString *decodedUser = [[url user] stringByRemovingPercentEncoding];
-        [details setObject:decodedUser forKey:@"user"];
-    }
-
-    if ([url password]) {
-        NSString *decodedPassword = [[url password] stringByRemovingPercentEncoding];
-        [details setObject:decodedPassword forKey:@"password"];
-        connect = @YES;
-    }
-
-    if ([[url host] length]) {
-        NSString *decodedHost = [[url host] stringByRemovingPercentEncoding];
-        [details setObject:decodedHost forKey:@"host"];
-    } else {
-        [details setObject:@"127.0.0.1" forKey:@"host"];
-    }
-
-    NSArray *pc = [url pathComponents];
-    if ([pc count] > 1) { // first object is "/"
-        [details setObject:[pc objectAtIndex:1] forKey:@"database"];
-    }
-
     SPWindowController *windowController = [self.tabManager newWindowForWindow];
-    [windowController.databaseDocument setState:@{@"connection":details,@"auto_connect": connect} fromFile:NO];
+    [windowController.databaseDocument setState:@{@"connection":details,@"auto_connect": @(connect)} fromFile:NO];
 }
 
 - (void)handleEventWithURL:(NSURL*)url
@@ -1409,8 +1353,7 @@ static const double SPDelayBeforeCheckingForNewReleases = 10;
 - (IBAction)openAboutPanel:(id)sender
 {
     if (!aboutController) {
-        aboutController = [[SPAboutController alloc] init];
-        aboutController.window.delegate = self;
+        aboutController = [[SAAboutWindowController alloc] initWithDelegate:self];
     }
 
     [aboutController showWindow:self];

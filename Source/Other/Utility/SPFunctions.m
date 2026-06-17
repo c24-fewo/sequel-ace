@@ -31,6 +31,28 @@
 #import "SPFunctions.h"
 #import <Security/SecRandom.h>
 #import <objc/runtime.h>
+#import <arpa/inet.h>
+#import <netinet/in.h>
+
+NSArray<NSString *> *SPValidMySQLConnectionURLQueryParameters(void)
+{
+	return @[@"ssh_host",
+	         @"ssh_port",
+	         @"ssh_user",
+	         @"ssh_password",
+	         @"ssh_keyLocation",
+	         @"ssh_keyLocationEnabled",
+	         @"socket",
+	         @"aws_profile",
+	         @"aws_region",
+	         @"enable_cleartext_plugin",
+	         @"type"];
+}
+
+static NSSet<NSString *> *SPValidMySQLConnectionURLTypes(void)
+{
+	return [NSSet setWithArray:@[@"tcpip", @"socket", @"ssh", @"aws_iam"]];
+}
 
 void SPMainQSync(SAVoidCompletionBlock block)
 {
@@ -135,6 +157,242 @@ id SPBoxNil(id object)
 	return object;
 }
 
+static NSString *SPTrimmedHostCandidate(NSString *candidate)
+{
+    if (!candidate) return nil;
+
+    NSString *trimmedCandidate = [candidate stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (![trimmedCandidate length]) return nil;
+
+    // SSH logs often wrap IP addresses in square brackets.
+    if ([trimmedCandidate hasPrefix:@"["] && [trimmedCandidate hasSuffix:@"]"] && [trimmedCandidate length] > 2) {
+        trimmedCandidate = [trimmedCandidate substringWithRange:NSMakeRange(1, [trimmedCandidate length] - 2)];
+    }
+
+    return trimmedCandidate;
+}
+
+static BOOL SPIsPrivateIPv4Address(struct in_addr address)
+{
+    uint32_t hostAddress = ntohl(address.s_addr);
+
+    // Loopback is local-only and does not require Local Network privacy permission.
+    if ((hostAddress & 0xFF000000) == 0x7F000000) return NO;
+
+    // RFC1918 private ranges.
+    if ((hostAddress & 0xFF000000) == 0x0A000000) return YES;   // 10.0.0.0/8
+    if ((hostAddress & 0xFFF00000) == 0xAC100000) return YES;   // 172.16.0.0/12
+    if ((hostAddress & 0xFFFF0000) == 0xC0A80000) return YES;   // 192.168.0.0/16
+
+    // Common local-only ranges.
+    if ((hostAddress & 0xFFFF0000) == 0xA9FE0000) return YES;   // 169.254.0.0/16 link-local
+
+    return NO;
+}
+
+static BOOL SPIsPrivateIPv6Address(struct in6_addr address)
+{
+    if (IN6_IS_ADDR_LOOPBACK(&address)) return NO;
+
+    // fc00::/7 (unique local), fe80::/10 (link-local)
+    BOOL isUniqueLocal = ((address.s6_addr[0] & 0xFE) == 0xFC);
+    BOOL isLinkLocal = (address.s6_addr[0] == 0xFE) && ((address.s6_addr[1] & 0xC0) == 0x80);
+
+    return isUniqueLocal || isLinkLocal;
+}
+
+BOOL SPIsLikelyLocalNetworkHost(NSString *host)
+{
+    NSString *trimmedHost = SPTrimmedHostCandidate(host);
+    if (![trimmedHost length]) return NO;
+
+    NSString *normalizedHost = [trimmedHost lowercaseString];
+
+    if ([normalizedHost isEqualToString:@"localhost"] || [normalizedHost isEqualToString:@"::1"]) return NO;
+    if ([normalizedHost hasSuffix:@".local"]) return YES;
+
+    struct in_addr ipv4Address;
+    if (inet_pton(AF_INET, [normalizedHost UTF8String], &ipv4Address) == 1) {
+        return SPIsPrivateIPv4Address(ipv4Address);
+    }
+
+    struct in6_addr ipv6Address;
+    if (inet_pton(AF_INET6, [normalizedHost UTF8String], &ipv6Address) == 1) {
+        return SPIsPrivateIPv6Address(ipv6Address);
+    }
+
+    // Hostnames without a DNS suffix are often local/intranet aliases.
+    // This can also match SSH config aliases for public hosts when no parsed SSH debug IP
+    // is available, so SPSSHNoRouteToHostLikelyLocalNetworkPrivacyIssue prioritizes parsed
+    // debug candidates before falling back to this hostname heuristic.
+    if ([normalizedHost rangeOfString:@"."].location == NSNotFound) {
+        return YES;
+    }
+
+    return NO;
+}
+
+static void SPAddSSHRegexMatches(NSMutableOrderedSet<NSString *> *candidates, NSString *debugDetail, NSString *pattern)
+{
+    if (![debugDetail length]) return;
+
+    NSError *regexError = nil;
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionCaseInsensitive error:&regexError];
+    if (regexError || !regex) return;
+
+    NSArray<NSTextCheckingResult *> *matches = [regex matchesInString:debugDetail options:0 range:NSMakeRange(0, [debugDetail length])];
+    for (NSTextCheckingResult *result in matches) {
+        if ([result numberOfRanges] < 2) continue;
+        NSRange captureRange = [result rangeAtIndex:1];
+        if (captureRange.location == NSNotFound) continue;
+        NSString *candidate = SPTrimmedHostCandidate([debugDetail substringWithRange:captureRange]);
+        if ([candidate length]) [candidates addObject:candidate];
+    }
+}
+
+BOOL SPSSHNoRouteToHostLikelyLocalNetworkPrivacyIssue(NSString *errorMessage, NSString *debugDetail, NSString *sshHost)
+{
+    NSMutableString *combinedMessage = [NSMutableString string];
+    if ([errorMessage length]) [combinedMessage appendString:errorMessage];
+    if ([debugDetail length]) {
+        if ([combinedMessage length]) [combinedMessage appendString:@"\n"];
+        [combinedMessage appendString:debugDetail];
+    }
+
+    if ([combinedMessage rangeOfString:@"No route to host" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+        return NO;
+    }
+
+    NSMutableOrderedSet<NSString *> *parsedCandidates = [NSMutableOrderedSet orderedSet];
+
+    SPAddSSHRegexMatches(parsedCandidates, debugDetail, @"connect to address ([^\\s]+)\\s+port\\s+\\d+:\\s+No route to host");
+    SPAddSSHRegexMatches(parsedCandidates, debugDetail, @"Connecting to .*?\\[([^\\]]+)\\]\\s+port\\s+\\d+");
+
+    for (NSString *candidate in parsedCandidates) {
+        if (SPIsLikelyLocalNetworkHost(candidate)) return YES;
+    }
+
+    if ([parsedCandidates count]) return NO;
+
+    NSString *trimmedSSHHost = SPTrimmedHostCandidate(sshHost);
+    if (![trimmedSSHHost length]) return NO;
+
+    return SPIsLikelyLocalNetworkHost(trimmedSSHHost);
+}
+
+BOOL SPExtractConnectionDetailsFromMySQLURL(NSURL *url, NSMutableDictionary *details, BOOL *autoConnect, NSArray<NSString *> **invalidParameters)
+{
+	if (autoConnect) *autoConnect = NO;
+	if (invalidParameters) *invalidParameters = @[];
+
+	if (!url || ![[url scheme] isEqualToString:@"mysql"] || !details) return NO;
+
+	NSString *requestedType = nil;
+	NSSet<NSString *> *validParameterSet = [NSSet setWithArray:SPValidMySQLConnectionURLQueryParameters()];
+	NSMutableArray<NSString *> *invalid = [NSMutableArray array];
+
+	if ([url query]) {
+		NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+		for (NSURLQueryItem *queryItem in [components queryItems]) {
+			if (![queryItem.name length]) continue;
+
+			if (![validParameterSet containsObject:queryItem.name]) {
+				[invalid addObject:queryItem.name];
+				continue;
+			}
+
+			NSString *decodedValue = queryItem.value ?: @"";
+
+			if ([queryItem.name isEqualToString:@"type"]) {
+				requestedType = [[decodedValue lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+				continue;
+			}
+
+			// Normalize enable_cleartext_plugin to enableClearTextPlugin with NSNumber value
+			if ([queryItem.name isEqualToString:@"enable_cleartext_plugin"]) {
+				BOOL enableClearText = ([decodedValue isEqualToString:@"1"] ||
+										[[decodedValue lowercaseString] isEqualToString:@"true"] ||
+										[[decodedValue lowercaseString] isEqualToString:@"yes"] ||
+										[[decodedValue lowercaseString] isEqualToString:@"y"]);
+				[details setObject:@(enableClearText) forKey:@"enableClearTextPlugin"];
+				continue;
+			}
+
+			[details setObject:decodedValue forKey:queryItem.name];
+		}
+	}
+
+	if ([requestedType length] && ![SPValidMySQLConnectionURLTypes() containsObject:requestedType]) {
+		[invalid addObject:@"type"];
+	}
+
+	if ([invalid count] > 0) {
+		if (invalidParameters) *invalidParameters = [invalid copy];
+		return NO;
+	}
+
+	BOOL hasAWSIAMIndicators = ([[details objectForKey:@"aws_profile"] length]
+								|| [[details objectForKey:@"aws_region"] length]
+								|| [requestedType isEqualToString:@"aws_iam"]);
+	BOOL hasSocketIndicators = ([[details objectForKey:@"socket"] length]
+								|| [requestedType isEqualToString:@"socket"]);
+
+	if ([requestedType isEqualToString:@"socket"]) {
+		[details setObject:@"SPSocketConnection" forKey:@"type"];
+	}
+	else if ([requestedType isEqualToString:@"ssh"]) {
+		[details setObject:@"SPSSHTunnelConnection" forKey:@"type"];
+	}
+	else if ([requestedType isEqualToString:@"tcpip"]) {
+		[details setObject:@"SPTCPIPConnection" forKey:@"type"];
+	}
+	else if (hasAWSIAMIndicators) {
+		[details setObject:@"SPAWSIAMConnection" forKey:@"type"];
+	}
+	else if (hasSocketIndicators) {
+		[details setObject:@"SPSocketConnection" forKey:@"type"];
+	}
+	else if ([details objectForKey:@"ssh_host"]) {
+		[details setObject:@"SPSSHTunnelConnection" forKey:@"type"];
+	}
+	else {
+		[details setObject:@"SPTCPIPConnection" forKey:@"type"];
+	}
+
+	if ([url port]) {
+		[details setObject:[url port] forKey:@"port"];
+	}
+
+	if ([url user]) {
+		NSString *decodedUser = [[url user] stringByRemovingPercentEncoding];
+		[details setObject:(decodedUser ?: [url user]) forKey:@"user"];
+	}
+
+	if ([url password]) {
+		NSString *decodedPassword = [[url password] stringByRemovingPercentEncoding];
+		[details setObject:(decodedPassword ?: [url password]) forKey:@"password"];
+		if (autoConnect) *autoConnect = YES;
+	}
+
+	if ([[url host] length]) {
+		NSString *decodedHost = [[url host] stringByRemovingPercentEncoding];
+		[details setObject:(decodedHost ?: [url host]) forKey:@"host"];
+	}
+	else {
+		[details setObject:@"127.0.0.1" forKey:@"host"];
+	}
+
+	NSArray *pathComponents = [url pathComponents];
+	if ([pathComponents count] > 1) { // first object is "/"
+		NSString *database = [pathComponents objectAtIndex:1];
+		NSString *decodedDatabase = [database stringByRemovingPercentEncoding];
+		if (decodedDatabase) database = decodedDatabase;
+		if ([database length]) [details setObject:database forKey:@"database"];
+	}
+
+	return YES;
+}
+
 void SP_swizzleInstanceMethod(Class c, SEL original, SEL replacement)
 {
 	Method a = class_getInstanceMethod(c, original);
@@ -181,5 +439,3 @@ NSInteger intSortDesc(id num1, id num2, void *context)
     else
         return NSOrderedSame;
 }
-
-

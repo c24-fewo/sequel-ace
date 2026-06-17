@@ -29,12 +29,14 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPConnectionController.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "SPDatabaseDocument.h"
 #import "SPAppController.h"
 #import "SPPreferenceController.h"
 #import "ImageAndTextCell.h"
 #import "RegexKitLite.h"
 #import "SPKeychain.h"
+#import <objc/runtime.h>
 #import "SPSSHTunnel.h"
 #import "SPFileHandle.h"
 #import "SPTableTextFieldCell.h"
@@ -54,8 +56,9 @@
 #import "SPSplitView.h"
 #import "SPColorSelectorView.h"
 #import "SPFunctions.h"
-#import "SPBundleHTMLOutputController.h"
 #import "SPBundleManager.h"
+// AWS IAM Authentication is now implemented in Swift
+// See: AWSCredentials.swift, RDSIAMAuthentication.swift, AWSSTSClient.swift, AWSMFATokenDialog.swift, AWSIAMAuthManager.swift
 
 #import <SPMySQL/SPMySQL.h>
 
@@ -81,6 +84,7 @@ const static NSInteger SPUseSystemTimeZoneTag = -2;
 @property (readwrite, assign) BOOL isEditingConnection;
 @property (readwrite, assign) BOOL allowSplitViewResizing;
 @property (readwrite, assign) BOOL errorShowing;
+@property (readwrite, assign) BOOL localNetworkPermissionDeniedForCurrentAttempt;
 
 - (void)_saveCurrentDetailsCreatingNewFavorite:(BOOL)createNewFavorite validateDetails:(BOOL)validateDetails;
 - (void)_sortFavorites;
@@ -103,6 +107,11 @@ const static NSInteger SPUseSystemTimeZoneTag = -2;
 - (NSString *)_generateNameForConnection;
 
 - (void)_startEditingConnection;
+- (BOOL)_isAWSIAMConnection;
+- (BOOL)_shouldRequireMySQLHost;
+- (void)_syncAWSIAMAndSSLInterfaceState;
+- (void)_refreshAWSAvailableRegions;
+- (BOOL)_isVaultConnection;
 
 static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, void *key);
 
@@ -113,20 +122,114 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 #pragma mark - SPConnectionHandlerPrivateAPI
 
 - (void)_showConnectionTestResult:(NSString *)resultString;
-
-#pragma mark - SPConnectionControllerDelegate_Private_API
-
-- (void)_setNodeIsExpanded:(BOOL)expanded fromNotification:(NSNotification *)notification;
+- (BOOL)_shouldShowLocalNetworkPermissionAlertForErrorMessage:(NSString *)errorMessage detail:(NSString *)errorDetail;
+- (BOOL)_isLocalNetworkAccessDeniedForCurrentConnectionAttempt;
+- (void)_failConnectionWithTitle:(NSString *)theTitle errorMessage:(NSString *)theErrorMessage detail:(NSString *)errorDetail localNetworkPermissionDenied:(BOOL)localNetworkPermissionDenied;
+- (void)_showLocalNetworkPermissionAlert;
+- (BOOL)_openLocalNetworkPrivacySettings;
 
 #pragma mark - SPConnectionControllerInitializer_Private_API
 
-- (void)_restoreOutlineViewStateNode:(SPTreeNode *)node;
 - (void)_processFavoritesDataChange:(NSNotification *)aNotification;
 - (void)scrollViewFrameChanged:(NSNotification *)aNotification;
+- (BOOL)connectionStringComponentsContainDisplaySecrets:(NSURLComponents *)components;
+- (NSString *)redactedConnectionStringForDisplayFromComponents:(NSURLComponents *)components fallback:(NSString *)fallback;
+- (NSMutableDictionary *)favoriteImportDictionaryByAssigningNewIDs:(NSDictionary *)item;
+- (void)collectFavoriteImportLeavesFromItems:(NSArray *)items intoArray:(NSMutableArray *)favorites;
+- (NSArray *)favoriteImportItemsByApplyingDuplicateActionsToItems:(NSArray *)items duplicateItems:(NSArray<SPDuplicateImportItem *> *)duplicateItems;
+- (void)setUpPasswordRevealButtons;
+- (void)addPasswordRevealButtonForField:(NSSecureTextField *)field keyPath:(NSString *)keyPath;
+- (void)toggleConnectionPasswordVisibility:(NSButton *)sender;
+
+@end
+
+@interface SPPasswordRevealButton : NSButton
+@end
+
+@implementation SPPasswordRevealButton
+
+- (void)resetCursorRects
+{
+    [super resetCursorRects];
+    [self addCursorRect:self.bounds cursor:[NSCursor pointingHandCursor]];
+}
 
 @end
 
 @implementation SPConnectionController
+
+// Associated object keys for password visibility toggle (shared between methods)
+static void *kOriginalStringKey = &kOriginalStringKey;
+static void *kRedactedStringKey = &kRedactedStringKey;
+static void *kURLFieldKey = &kURLFieldKey;
+static void *kPasswordFieldKey = &kPasswordFieldKey;
+static void *kPlainPasswordFieldKey = &kPlainPasswordFieldKey;
+static void *kRevealPasswordImageKey = &kRevealPasswordImageKey;
+static void *kHidePasswordImageKey = &kHidePasswordImageKey;
+
+#pragma mark - Connection Type Mapping Helpers
+
+/**
+ * Converts a connection type string to its numeric tag value.
+ * @param typeString The connection type string (e.g., "SPSocketConnection")
+ * @return The corresponding numeric tag (0=TCP/IP, 1=Socket, 2=SSH, 3=AWS IAM)
+ */
++ (NSInteger)favoriteTypeTagForString:(NSString *)typeString
+{
+    if ([typeString isEqualToString:@"SPSocketConnection"]) {
+        return SPSocketConnection;
+    }
+    else if ([typeString isEqualToString:@"SPSSHTunnelConnection"]) {
+        return SPSSHTunnelConnection;
+    }
+    else if ([typeString isEqualToString:@"SPAWSIAMConnection"]) {
+        return SPAWSIAMConnection;
+    }
+    return SPTCPIPConnection; // Default
+}
+
+/**
+ * Converts a connection type tag to its string representation.
+ * @param typeTag The connection type tag (0=TCP/IP, 1=Socket, 2=SSH, 3=AWS IAM)
+ * @return The corresponding type string
+ */
++ (NSString *)stringForFavoriteTypeTag:(NSInteger)typeTag
+{
+    switch (typeTag) {
+        case SPSocketConnection:
+            return @"SPSocketConnection";
+        case SPSSHTunnelConnection:
+            return @"SPSSHTunnelConnection";
+        case SPAWSIAMConnection:
+            return @"SPAWSIAMConnection";
+        case SPTCPIPConnection:
+        default:
+            return @"SPTCPIPConnection";
+    }
+}
+
++ (NSString *)normalizedPortForDuplicateComparison:(id)port type:(NSString *)type
+{
+    NSInteger typeTag = [SPConnectionController favoriteTypeTagForString:type];
+    NSString *portString = @"";
+
+    if ([port isKindOfClass:[NSNumber class]]) {
+        portString = [(NSNumber *)port stringValue];
+    }
+    else if ([port isKindOfClass:[NSString class]]) {
+        portString = [(NSString *)port stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+
+    if (typeTag == SPSocketConnection) {
+        return portString;
+    }
+
+    if (portString.length == 0) {
+        return @"3306";
+    }
+
+    return portString;
+}
 
 @synthesize delegate;
 @synthesize type;
@@ -142,6 +245,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 @synthesize timeZoneIdentifier;
 @synthesize allowDataLocalInfile;
 @synthesize enableClearTextPlugin;
+@synthesize useAWSIAMAuth;
+@synthesize awsRegion;
+@synthesize awsProfile;
 @synthesize useSSL;
 @synthesize sslKeyFileLocationEnabled;
 @synthesize sslKeyFileLocation;
@@ -155,6 +261,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 @synthesize sshKeyLocationEnabled;
 @synthesize sshKeyLocation;
 @synthesize sshPort;
+@synthesize sshRemoteSocketPath;
 @synthesize useCompression;
 @synthesize bookmarks;
 @synthesize allowSplitViewResizing;
@@ -184,6 +291,71 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     NSString *kcPassword = [keychain getPasswordForName:kcItemName account:[self connectionKeychainItemAccount]];
 
     return kcPassword;
+}
+
+- (NSString *)passwordForConnectionRequest
+{
+    if ([self _isAWSIAMConnection]) {
+        return [self generateAWSIAMAuthToken];
+    }
+
+    return [self keychainPassword];
+}
+
+/**
+ * Generates a fresh AWS IAM authentication token.
+ * Called both during initial connection and for token refresh on reconnection.
+ * Uses the Swift AWSIAMAuthManager for all AWS operations.
+ * Note: Only AWS CLI profiles are supported. Manual credentials are not persisted securely.
+ */
+- (NSString *)generateAWSIAMAuthTokenWithError:(NSError **)errorPointer
+{
+    NSInteger dbPort = [[self port] length] ? [[self port] integerValue] : 3306;
+
+    // Get profile name (defaults to "default" if empty)
+    NSString *trimmedProfileName = [[self awsProfile] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *profileName = [trimmedProfileName length] > 0 ? trimmedProfileName : @"default";
+
+    NSError *awsError = nil;
+
+    // Use the Swift AWSIAMAuthManager for token generation (profile-based only)
+    NSString *token = [AWSIAMAuthManager generateAuthTokenWithHostname:[self host]
+                                                                  port:dbPort
+                                                              username:[self user]
+                                                                region:[self awsRegion]
+                                                               profile:profileName
+                                                             accessKey:nil
+                                                             secretKey:nil
+                                                          parentWindow:[dbDocument parentWindowControllerWindow]
+                                                                 error:&awsError];
+
+    if (errorPointer) {
+        *errorPointer = awsError;
+    }
+
+    if (awsError) {
+        NSLog(@"AWS IAM Authentication token generation failed: %@", awsError.localizedDescription);
+        return nil;
+    }
+
+    if (![token length]) {
+        if (errorPointer && !*errorPointer) {
+            *errorPointer = [NSError errorWithDomain:@"AWSIAMAuthErrorDomain"
+                                                code:-1
+                                            userInfo:@{
+                                                NSLocalizedDescriptionKey: NSLocalizedString(@"Empty authentication token returned", @"AWS IAM empty token error")
+                                            }];
+        }
+        NSLog(@"AWS IAM Authentication token generation failed: empty authentication token returned");
+        return nil;
+    }
+
+    return token;
+}
+
+- (NSString *)generateAWSIAMAuthToken
+{
+    return [self generateAWSIAMAuthTokenWithError:nil];
 }
 
 - (NSString *)keychainPasswordForSSH
@@ -221,67 +393,89 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
     // If triggered via the "Test Connection" button, set the state - otherwise clear it
     isTestingConnection = (sender == testConnectButton);
+    self.localNetworkPermissionDeniedForCurrentAttempt = NO;
 
-    NSFileManager *fileManager = [NSFileManager defaultManager];
+    // Pre-connection validation runs through SAConnectionDetailsValidator
+    // FIRST so the user-facing "first error" ordering matches the
+    // pre-refactor behavior (host non-empty beats every later check,
+    // including AWS-directory authorization). On failure the controller
+    // still owns the alert + per-failure side effects (clearing the
+    // matching enabled toggles / paths) so the user can correct the input.
+    SAConnectionValidationFailure *failure = [SAConnectionDetailsValidator
+        validateWithType:(SAConnectionType)[self type]
+                    host:[self host] ?: @""
+                 sshHost:[self sshHost] ?: @""
+     sshRemoteSocketPath:[self sshRemoteSocketPath] ?: @""
+                  useSSL:[self useSSL]
+   sshKeyLocationEnabled:(sshKeyLocationEnabled != NSControlStateValueOff)
+         sshKeyLocation:sshKeyLocation
+sslKeyFileLocationEnabled:(sslKeyFileLocationEnabled != NSControlStateValueOff)
+     sslKeyFileLocation:sslKeyFileLocation
+sslCertificateFileLocationEnabled:(sslCertificateFileLocationEnabled != NSControlStateValueOff)
+sslCertificateFileLocation:sslCertificateFileLocation
+sslCACertFileLocationEnabled:(sslCACertFileLocationEnabled != NSControlStateValueOff)
+  sslCACertFileLocation:sslCACertFileLocation];
 
-    // Ensure that host is not empty if this is a TCP/IP or SSH connection
-    if (([self type] == SPTCPIPConnection || [self type] == SPSSHTunnelConnection) && ![[self host] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message") message:NSLocalizedString(@"Insufficient details provided to establish a connection. Please enter at least the hostname.", @"insufficient details informative message") callback:nil];
+    if (failure) {
+        switch (failure.kind) {
+            case SAConnectionValidationFailureKindSshKeyFileMissing:
+                [self setSshKeyLocationEnabled:NSControlStateValueOff];
+                break;
+            case SAConnectionValidationFailureKindSslKeyFileMissing:
+                [self setSslKeyFileLocationEnabled:NSControlStateValueOff];
+                [self setSslKeyFileLocation:nil];
+                break;
+            case SAConnectionValidationFailureKindSslCertificateFileMissing:
+                [self setSslCertificateFileLocationEnabled:NSControlStateValueOff];
+                [self setSslCertificateFileLocation:nil];
+                break;
+            case SAConnectionValidationFailureKindSslCACertFileMissing:
+                [self setSslCACertFileLocationEnabled:NSControlStateValueOff];
+                [self setSslCACertFileLocation:nil];
+                break;
+            case SAConnectionValidationFailureKindHostMissing:
+            case SAConnectionValidationFailureKindSshHostMissing:
+                break;
+        }
+        [NSAlert createWarningAlertWithTitle:failure.alertTitle message:failure.alertMessage callback:nil];
         return;
     }
 
-    // If SSH is enabled, ensure that the SSH host is not nil
-    if ([self type] == SPSSHTunnelConnection && ![[self sshHost] length]) {
-        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message") message:NSLocalizedString(@"Insufficient details provided to establish a connection. Please enter the hostname for the SSH Tunnel, or disable the SSH Tunnel.", @"insufficient SSH tunnel details informative message") callback:nil];
+    // AWS-directory authorization stays inline — it depends on the
+    // Security framework bookmark state, which the pure validator
+    // can't represent. Ordered AFTER the validator so the
+    // host-missing alert still beats this one for AWS IAM favorites
+    // with an empty host (matches pre-refactor behavior).
+    if ([self _isAWSIAMConnection] && ![self isAWSDirectoryAuthorized]) {
+        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"AWS Authorization Required", @"AWS authorization required title")
+                                     message:NSLocalizedString(@"Authorize access to your ~/.aws directory before testing or connecting with an AWS IAM favorite.", @"AWS authorization required message")
+                                    callback:nil];
         return;
     }
 
-    // If an SSH key has been provided, verify it exists
-    if ([self type] == SPSSHTunnelConnection && sshKeyLocationEnabled && sshKeyLocation) {
-        if (![fileManager fileExistsAtPath:[sshKeyLocation stringByExpandingTildeInPath]]) {
-            [self setSshKeyLocationEnabled:NSControlStateValueOff];
-            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"SSH Key not found", @"SSH key check error") message:NSLocalizedString(@"A SSH key location was specified, but no file was found in the specified location.  Please re-select the key and try again.", @"SSH key not found message") callback:nil];
-            return;
-        }
+    if ([self _isVaultConnection] && ![[self vaultHost] length]) {
+        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                     message:NSLocalizedString(@"A Vault host is required to connect.", @"vault host required connect message")
+                                    callback:nil];
+        return;
     }
-
-    // If SSL keys have been supplied, verify they exist
-    if (([self type] == SPTCPIPConnection || [self type] == SPSocketConnection) && [self useSSL]) {
-
-        if (sslKeyFileLocationEnabled && sslKeyFileLocation &&
-            ![fileManager fileExistsAtPath:[sslKeyFileLocation stringByExpandingTildeInPath]])
-        {
-            [self setSslKeyFileLocationEnabled:NSControlStateValueOff];
-            [self setSslKeyFileLocation:nil];
-
-            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"SSL Key File not found", @"SSL key file check error") message:NSLocalizedString(@"A SSL key file location was specified, but no file was found in the specified location.  Please re-select the key file and try again.", @"SSL key file not found message") callback:nil];
-            return;
-        }
-
-        if (sslCertificateFileLocationEnabled && sslCertificateFileLocation &&
-            ![fileManager fileExistsAtPath:[sslCertificateFileLocation stringByExpandingTildeInPath]])
-        {
-            [self setSslCertificateFileLocationEnabled:NSControlStateValueOff];
-            [self setSslCertificateFileLocation:nil];
-
-            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"SSL Certificate File not found", @"SSL certificate file check error") message:NSLocalizedString(@"A SSL certificate location was specified, but no file was found in the specified location.  Please re-select the certificate and try again.", @"SSL certificate file not found message") callback:nil];
-            return;
-        }
-
-        if (sslCACertFileLocationEnabled && sslCACertFileLocation &&
-            ![fileManager fileExistsAtPath:[sslCACertFileLocation stringByExpandingTildeInPath]])
-        {
-            [self setSslCACertFileLocationEnabled:NSControlStateValueOff];
-            [self setSslCACertFileLocation:nil];
-
-            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"SSL Certificate Authority File not found", @"SSL certificate authority file check error") message:NSLocalizedString(@"A SSL Certificate Authority certificate location was specified, but no file was found in the specified location.  Please re-select the Certificate Authority certificate and try again.", @"SSL CA certificate file not found message") callback:nil];
-            return;
-        }
+    if ([self _isVaultConnection] && ![[self vaultCredentialsPath] length]) {
+        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                     message:NSLocalizedString(@"A Vault credentials path is required to connect.", @"vault creds path required connect message")
+                                    callback:nil];
+        return;
+    }
+    if ([self _isVaultConnection] && ![[self host] length]) {
+        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                     message:NSLocalizedString(@"A database host is required to connect.", @"vault db host required connect message")
+                                    callback:nil];
+        return;
     }
 
     // Basic details have validated - start the connection process animating
     isConnecting = YES;
     cancellingConnection = NO;
+    connectionAttemptID++;
     errorShowing = NO;
 
     // Disable the favorites outline view to prevent further connections attempts
@@ -324,15 +518,206 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     // Trim whitespace and newlines from the host field before attempting to connect
     [self setHost:[[self host] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]];
 
-    // Initiate the SSH connection process for tunnels
+    // For SSH connections, validate the config file before proceeding
     if ([self type] == SPSSHTunnelConnection) {
-        [self performSelector:@selector(initiateSSHTunnelConnection) withObject:nil afterDelay:0.0];
+        [self setSshHost:[[self sshHost] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+        if (![self _validateSSHConfigFile]) {
+            return;
+        }
+    }
 
+    // Resolve passwords (handles keychain marker and AWS IAM token)
+    NSString *resolvedPassword = [self _resolvedMySQLPassword];
+    if (!resolvedPassword) return; // AWS IAM error already shown
+
+    NSString *resolvedSSHPassword = [self _resolvedSSHPassword];
+
+    // Build connection info and preferences
+    SAConnectionInfoObjC *info = [self _buildConnectionInfo];
+    SAConnectionPreferences *preferences = [SAConnectionPreferences fromUserDefaults];
+
+    // Update progress text
+    if (isTestingConnection) {
+        [progressIndicatorText setStringValue:([self type] == SPSSHTunnelConnection)
+            ? NSLocalizedString(@"Testing SSH...", @"testing SSH status message")
+            : NSLocalizedString(@"Testing MySQL...", @"testing MySQL status message")];
+    } else {
+        [progressIndicatorText setStringValue:([self type] == SPSSHTunnelConnection)
+            ? NSLocalizedString(@"SSH connecting...", @"SSH connecting status message")
+            : NSLocalizedString(@"MySQL connecting...", @"MySQL connecting status message")];
+    }
+
+    // Change Connect button to Cancel
+    [connectButton setTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+    [connectButton setAction:@selector(cancelConnection:)];
+    [connectButton setEnabled:YES];
+    [connectButton display];
+
+    // Shared completion handler — used by both the Vault and non-Vault paths.
+    __weak __kindof SPConnectionController *weakSelf = self;
+    void (^connectCompletion)(SAConnectionResult *) = ^(SAConnectionResult *result) {
+        SPConnectionController *strongSelf = weakSelf;
+        if (!strongSelf) return;
+
+        // User cancelled (e.g. SSH password prompt) — silently restore UI
+        if (result.userCancelled) {
+            [strongSelf _restoreConnectionInterface];
+            return;
+        }
+
+        // Store tunnel on controller ivar for failConnectionWithTitle: cleanup.
+        if (result.sshTunnel) {
+            strongSelf->sshTunnel = result.sshTunnel;
+        } else if (strongSelf.connectionService.activeTunnel) {
+            strongSelf->sshTunnel = strongSelf.connectionService.activeTunnel;
+        }
+
+        // Database selection failure
+        if (result.databaseSelectionFailed) {
+            strongSelf->mySQLConnection = result.connection;
+            if (strongSelf->isTestingConnection) {
+                [strongSelf cancelConnection:nil];
+                [strongSelf _showConnectionTestResult:NSLocalizedString(@"Invalid database", @"Invalid database very short status message")];
+            } else {
+                [strongSelf failConnectionWithTitle:NSLocalizedString(@"Unable to connect", @"connection failed title")
+                                 errorMessage:[NSString stringWithFormat:NSLocalizedString(@"Connected but unable to select database '%@'.", @"message when database selection fails"), info.database]
+                                       detail:result.databaseSelectionError];
+            }
+            return;
+        }
+
+        // Connection failure — format case-specific error messages
+        if (!result.isSuccess) {
+            // Check local network denial before clearing mySQLConnection
+            BOOL localNetworkDenied = result.isLocalNetworkDenied || [strongSelf _isLocalNetworkAccessDeniedForCurrentConnectionAttempt];
+            strongSelf->mySQLConnection = nil;
+
+            NSString *failTitle = result.errorTitle ?: NSLocalizedString(@"Unable to connect", @"connection failed title");
+            // rawErrorMessage is populated for MySQL errors; errorMessage for SSH tunnel errors
+            NSString *failMessage = (result.rawErrorMessage.length > 0) ? result.rawErrorMessage : (result.errorMessage ?: @"");
+            NSString *failDetail = nil;
+
+            // Format detailed error based on connection type and error code
+            if (result.sshDebugMessages.length > 0 && strongSelf->sshTunnel) {
+                // SSH tunnel failure — show debug messages
+                failTitle = NSLocalizedString(@"SSH port forwarding failed", @"title when ssh tunnel port forwarding failed");
+                failDetail = result.sshDebugMessages;
+            } else if (result.lastErrorID == 1045) {
+                // Access denied
+                failTitle = NSLocalizedString(@"Access denied!", @"connection failed due to access denied title");
+                failDetail = NSLocalizedString(@"Please check your username and password and try again.", @"");
+            } else if (result.connectionType == SAConnectionTypeSocket) {
+                if ([result.rawErrorMessage rangeOfString:@"No such file"].location != NSNotFound) {
+                    failTitle = NSLocalizedString(@"Socket not found!", @"socket not found title");
+                } else {
+                    failTitle = NSLocalizedString(@"Socket connection failed!", @"socket connection failed title");
+                }
+            }
+
+            [strongSelf _failConnectionWithTitle:failTitle
+                              errorMessage:failMessage
+                                    detail:failDetail
+                   localNetworkPermissionDenied:localNetworkDenied];
+            return;
+        }
+
+        // Success — store connection and delegate to existing handler
+        strongSelf->mySQLConnection = result.connection;
+        [strongSelf mySQLConnectionEstablished];
+    };
+
+    // Vault: fetch ephemeral credentials on a background thread so that a
+    // browser-based OIDC flow (up to 120 s) does not block the main thread.
+    // The service call is then dispatched back to the main thread.
+    if ([self _isVaultConnection]) {
+        NSString *credHost = [[self vaultHost] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString *credPort  = [[self vaultPort] length] ? [self vaultPort] : @"443";
+        NSString *credMount = [[self vaultOIDCMount] length] ? [self vaultOIDCMount] : @"oidc";
+        NSString *credPath  = [self vaultCredentialsPath];
+        NSUInteger vaultConnectionAttemptID = connectionAttemptID;
+        NSString *vaultLoginIdentifierForAttempt = [VaultOIDCHandler prepareActiveLogin];
+        vaultLoginIdentifier = vaultLoginIdentifierForAttempt;
+
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSError *vaultError = nil;
+            NSString *outUsername = nil;
+            NSString *outPassword = nil;
+
+            SPConnectionController *strongSelf = weakSelf;
+            if (!strongSelf || strongSelf->cancellingConnection || strongSelf->connectionAttemptID != vaultConnectionAttemptID) {
+                [VaultOIDCHandler clearPreparedActiveLoginWithIdentifier:vaultLoginIdentifierForAttempt];
+                return;
+            }
+
+            BOOL success = [VaultAuthManager generateCredentialsWithHost:credHost
+                                                                    port:credPort
+                                                              oidcMount:credMount
+                                                               credPath:credPath
+                                                        loginIdentifier:vaultLoginIdentifierForAttempt
+                                                               username:&outUsername
+                                                               password:&outPassword
+                                                                  error:&vaultError];
+            [VaultOIDCHandler clearPreparedActiveLoginWithIdentifier:vaultLoginIdentifierForAttempt];
+
+            // User may cancel while the OIDC browser is open; bail without showing an error.
+            strongSelf = weakSelf;
+            if (!strongSelf || strongSelf->cancellingConnection || strongSelf->connectionAttemptID != vaultConnectionAttemptID) {
+                [VaultAuthManager clearCachedCredentialsForHost:credHost
+                                                           port:credPort
+                                                     oidcMount:credMount
+                                                       credPath:credPath];
+                return;
+            }
+
+            if (!success || ![outUsername length] || ![outPassword length]) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    SPConnectionController *strongSelf = weakSelf;
+                    if (!strongSelf || strongSelf->connectionAttemptID != vaultConnectionAttemptID) return;
+                    if ([strongSelf->vaultLoginIdentifier isEqualToString:vaultLoginIdentifierForAttempt]) {
+                        strongSelf->vaultLoginIdentifier = nil;
+                    }
+                    [strongSelf failConnectionWithTitle:NSLocalizedString(@"Vault Authentication Failed", @"Vault auth failed title")
+                                          errorMessage:vaultError ? vaultError.localizedDescription : NSLocalizedString(@"Vault returned empty credentials.", @"Vault auth empty creds error")
+                                                detail:nil];
+                });
+                return;
+            }
+
+            NSString *capturedUsername = outUsername;
+            NSString *capturedPassword = outPassword;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                SPConnectionController *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                // Second cancel check: user may have hit Cancel while we were on the background queue.
+                if (strongSelf->cancellingConnection || strongSelf->connectionAttemptID != vaultConnectionAttemptID) {
+                    [VaultAuthManager clearCachedCredentialsForHost:credHost
+                                                               port:credPort
+                                                         oidcMount:credMount
+                                                           credPath:credPath];
+                    return;
+                }
+                if ([strongSelf->vaultLoginIdentifier isEqualToString:vaultLoginIdentifierForAttempt]) {
+                    strongSelf->vaultLoginIdentifier = nil;
+                }
+                info.user = capturedUsername;
+                [strongSelf.connectionService connectWith:info
+                                             preferences:preferences
+                                                password:capturedPassword
+                                             sshPassword:@""
+                                            parentWindow:[strongSelf->dbDocument parentWindowControllerWindow]
+                                              completion:connectCompletion];
+            });
+        });
         return;
     }
 
-    // ...or start the MySQL connection process directly
-    [self performSelector:@selector(initiateMySQLConnection) withObject:nil afterDelay:0.0];
+    // Non-Vault: connect via service directly (async — completion on main thread)
+    [self.connectionService connectWith:info
+                            preferences:preferences
+                               password:resolvedPassword
+                            sshPassword:resolvedSSHPassword
+                           parentWindow:[dbDocument parentWindowControllerWindow]
+                             completion:connectCompletion];
 }
 
 /**
@@ -346,17 +731,23 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [progressIndicatorText display];
 
     cancellingConnection = YES;
+    connectionAttemptID++;
 
-    // Cancel the MySQL connection - handing it off to a background thread - if one is present
+    // Abort any in-progress Vault OIDC browser login so the background thread
+    // unblocks immediately rather than waiting up to 120 s for a callback.
+    if ([vaultLoginIdentifier length]) {
+        [VaultOIDCHandler cancelActiveLoginWithIdentifier:vaultLoginIdentifier];
+    }
+
+    // Cancel via connection service (handles both MySQL and SSH tunnel)
+    [self.connectionService cancel];
+
+    // Also clean up any locally-held references
     if (mySQLConnection) {
         [mySQLConnection setDelegate:nil];
-        [NSThread detachNewThreadWithName:SPCtxt(@"SPConnectionController cancellation background disconnect",dbDocument) target:mySQLConnection selector:@selector(disconnect) object:nil];
+        mySQLConnection = nil;
     }
-
-    // Cancel the SSH tunnel if present
-    if (sshTunnel) {
-        [sshTunnel disconnect];
-    }
+    sshTunnel = nil;
 
     // Restore the connection interface
     [self _restoreConnectionInterface];
@@ -419,7 +810,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         accessoryView = sshKeyLocationHelp;
     }
     // SSL key file location:
-    else if (sender == standardSSLKeyFileButton || sender == socketSSLKeyFileButton || sender == sslOverSSHKeyFileButton) {
+    else if (sender == standardSSLKeyFileButton || sender == socketSSLKeyFileButton || sender == sslOverSSHKeyFileButton || sender == vaultSSLKeyFileButton) {
         if ([sender state] == NSControlStateValueOff) {
             [self setSslKeyFileLocation:nil];
             return;
@@ -428,7 +819,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         accessoryView = sslKeyFileLocationHelp;
     }
     // SSL certificate file location:
-    else if (sender == standardSSLCertificateButton || sender == socketSSLCertificateButton || sender == sslOverSSHCertificateButton) {
+    else if (sender == standardSSLCertificateButton || sender == socketSSLCertificateButton || sender == sslOverSSHCertificateButton || sender == vaultSSLCertificateButton) {
         if ([sender state] == NSControlStateValueOff) {
             [self setSslCertificateFileLocation:nil];
             return;
@@ -437,7 +828,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         accessoryView = sslCertificateLocationHelp;
     }
     // SSL CA certificate file location:
-    else if (sender == standardSSLCACertButton || sender == socketSSLCACertButton || sender == sslOverSSHCACertButton) {
+    else if (sender == standardSSLCACertButton || sender == socketSSLCACertButton || sender == sslOverSSHCACertButton || sender == vaultSSLCACertButton) {
         if ([sender state] == NSControlStateValueOff) {
             [self setSslCACertFileLocation:nil];
             return;
@@ -522,7 +913,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
             [self setSshKeyLocation:selectedFilePath];
         }
         // SSL key file selection
-        else if (sender == self->standardSSLKeyFileButton || sender == self->socketSSLKeyFileButton || sender == self->sslOverSSHKeyFileButton) {
+        else if (sender == self->standardSSLKeyFileButton || sender == self->socketSSLKeyFileButton || sender == self->sslOverSSHKeyFileButton || sender == self->vaultSSLKeyFileButton) {
             if (returnCode == NSModalResponseCancel) {
                 [self setSslKeyFileLocationEnabled:NSControlStateValueOff];
                 [self setSslKeyFileLocation:nil];
@@ -538,7 +929,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
             [self setSslKeyFileLocation:selectedFilePath];
         }
         // SSL certificate file selection
-        else if (sender == self->standardSSLCertificateButton || sender == self->socketSSLCertificateButton || sender == self->sslOverSSHCertificateButton) {
+        else if (sender == self->standardSSLCertificateButton || sender == self->socketSSLCertificateButton || sender == self->sslOverSSHCertificateButton || sender == self->vaultSSLCertificateButton) {
             if (returnCode == NSModalResponseCancel) {
                 [self setSslCertificateFileLocationEnabled:NSControlStateValueOff];
                 [self setSslCertificateFileLocation:nil];
@@ -554,7 +945,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
             [self setSslCertificateFileLocation:selectedFilePath];
         }
         // SSL CA certificate file selection
-        else if (sender == self->standardSSLCACertButton || sender == self->socketSSLCACertButton || sender == self->sslOverSSHCACertButton) {
+        else if (sender == self->standardSSLCACertButton || sender == self->socketSSLCACertButton || sender == self->sslOverSSHCACertButton || sender == self->vaultSSLCACertButton) {
             if (returnCode == NSModalResponseCancel) {
                 [self setSslCACertFileLocationEnabled:NSControlStateValueOff];
                 [self setSslCACertFileLocation:nil];
@@ -715,6 +1106,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 - (IBAction)updateSSLInterface:(id)sender
 {
     [self _startEditingConnection];
+
+    [self _syncAWSIAMAndSSLInterfaceState];
     [self resizeTabViewToConnectionType:[self type] animating:YES];
 }
 
@@ -729,6 +1122,226 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 - (IBAction)updateClearTextPlugin:(id)sender
 {
     [self _startEditingConnection];
+}
+
+- (BOOL)_isAWSIAMConnection
+{
+    return [self type] == SPAWSIAMConnection;
+}
+
+- (BOOL)_shouldRequireMySQLHost
+{
+    NSString *trimmedRemoteSocketPath = [[self sshRemoteSocketPath] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([self type] == SPSSHTunnelConnection && [trimmedRemoteSocketPath length]) {
+        return NO;
+    }
+
+    return [self type] == SPTCPIPConnection || [self type] == SPSSHTunnelConnection || [self type] == SPAWSIAMConnection;
+}
+
+- (BOOL)_isVaultConnection
+{
+    return [self type] == SPVaultConnection;
+}
+
+- (void)_syncAWSIAMAndSSLInterfaceState
+{
+    BOOL isTCPIPConnection = ([self type] == SPTCPIPConnection);
+    BOOL isAWSIAMConnection = [self _isAWSIAMConnection];
+    BOOL isAWSDirectoryAuthorized = [self isAWSDirectoryAuthorized];
+    BOOL showAWSAuthorizationPrompt = (isAWSIAMConnection && !isAWSDirectoryAuthorized);
+    BOOL showAWSProfileRegionSelectors = (isAWSIAMConnection && isAWSDirectoryAuthorized);
+
+    // IAM connections always use TLS internally, so manual SSL settings are disabled for that mode.
+    if (isAWSIAMConnection && [self useSSL]) {
+        [self setUseSSL:NSControlStateValueOff];
+    }
+
+    if (standardConnectionSSLDetailsContainer) {
+        [standardConnectionSSLDetailsContainer setHidden:(!isTCPIPConnection || ![self useSSL])];
+    }
+
+    if (awsIAMPasswordField) {
+        [awsIAMPasswordField setEnabled:NO];
+        [awsIAMPasswordField setStringValue:@""];
+        [awsIAMPasswordField setPlaceholderString:NSLocalizedString(@"Generated from AWS IAM profile", @"placeholder when AWS IAM auth is enabled")];
+    }
+
+    if (standardPasswordField) {
+        [standardPasswordField setEnabled:YES];
+        [standardPasswordField setPlaceholderString:@""];
+    }
+
+    if (awsAuthorizeButton) {
+        [awsAuthorizeButton setHidden:!showAWSAuthorizationPrompt];
+    }
+
+    if (awsAuthorizeInfoLabel) {
+        [awsAuthorizeInfoLabel setHidden:!showAWSAuthorizationPrompt];
+    }
+
+    if (awsProfileLabel) {
+        [awsProfileLabel setHidden:!isAWSIAMConnection];
+    }
+
+    if (awsProfilePopup) {
+        [awsProfilePopup setHidden:!showAWSProfileRegionSelectors];
+    }
+
+    if (awsRegionLabel) {
+        [awsRegionLabel setHidden:!showAWSProfileRegionSelectors];
+    }
+
+    if (awsRegionComboBox) {
+        [awsRegionComboBox setHidden:!showAWSProfileRegionSelectors];
+    }
+}
+
+#pragma mark -
+#pragma mark AWS IAM Authentication
+
+/**
+ * Called when AWS IAM authentication settings are changed
+ */
+- (IBAction)updateAWSIAMInterface:(id)sender
+{
+    [self _startEditingConnection];
+
+    [self _syncAWSIAMAndSSLInterfaceState];
+    [self resizeTabViewToConnectionType:[self type] animating:YES];
+}
+
+/**
+ * Returns available AWS profiles from ~/.aws/credentials
+ */
+- (NSArray<NSString *> *)awsAvailableProfiles
+{
+    return [AWSIAMAuthManager availableProfiles];
+}
+
+/**
+ * Check if AWS directory access is authorized (for sandbox support)
+ */
+- (BOOL)isAWSDirectoryAuthorized
+{
+    return [AWSDirectoryBookmarkManager.shared isAWSDirectoryAuthorized];
+}
+
+/**
+ * Opens NSOpenPanel to authorize access to ~/.aws directory
+ */
+- (IBAction)authorizeAWSDirectory:(id)sender
+{
+    NSOpenPanel *openPanel = [NSOpenPanel openPanel];
+    [openPanel setCanChooseFiles:NO];
+    [openPanel setCanChooseDirectories:YES];
+    [openPanel setAllowsMultipleSelection:NO];
+    [openPanel setCanCreateDirectories:NO];
+    [openPanel setShowsHiddenFiles:YES];
+    [openPanel setMessage:NSLocalizedString(@"Select your .aws directory to enable AWS IAM authentication", @"AWS directory selection message")];
+    [openPanel setPrompt:NSLocalizedString(@"Authorize", @"AWS directory authorize button")];
+
+    // Start at the home directory
+    NSString *homeDirectory = NSHomeDirectory();
+    [openPanel setDirectoryURL:[NSURL fileURLWithPath:homeDirectory]];
+
+    [openPanel beginSheetModalForWindow:[dbDocument parentWindowControllerWindow] completionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK) {
+            NSURL *selectedURL = [openPanel URL];
+
+            // Verify the selected directory is the .aws folder or contains aws files
+            NSString *selectedPath = [selectedURL path];
+            BOOL isValidAWSDirectory = NO;
+
+            if ([selectedPath hasSuffix:@".aws"]) {
+                isValidAWSDirectory = YES;
+            } else {
+                // Check if it contains credentials or config file
+                NSFileManager *fm = [NSFileManager defaultManager];
+                if ([fm fileExistsAtPath:[selectedPath stringByAppendingPathComponent:@"credentials"]] ||
+                    [fm fileExistsAtPath:[selectedPath stringByAppendingPathComponent:@"config"]]) {
+                    isValidAWSDirectory = YES;
+                }
+            }
+
+            if (!isValidAWSDirectory) {
+                NSAlert *alert = [[NSAlert alloc] init];
+                [alert setMessageText:NSLocalizedString(@"Invalid AWS Directory", @"Invalid AWS directory alert title")];
+                [alert setInformativeText:NSLocalizedString(@"Please select the .aws directory in your home folder (usually ~/.aws). This directory should contain your AWS credentials and/or config files.", @"Invalid AWS directory alert message")];
+                [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+                [alert setAlertStyle:NSAlertStyleWarning];
+                [alert runModal];
+                return;
+            }
+
+            // Add the bookmark
+            if ([AWSDirectoryBookmarkManager.shared addAWSDirectoryBookmarkFrom:selectedURL]) {
+                SPLog(@"Successfully authorized AWS directory access");
+
+                // Trigger KVO updates for bindings
+                [self willChangeValueForKey:@"isAWSDirectoryAuthorized"];
+                [self didChangeValueForKey:@"isAWSDirectoryAuthorized"];
+                [self willChangeValueForKey:@"awsAvailableProfiles"];
+                [self didChangeValueForKey:@"awsAvailableProfiles"];
+
+                // Post notification
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"AWSDirectoryAuthorizationChanged" object:self];
+            } else {
+                NSAlert *alert = [[NSAlert alloc] init];
+                [alert setMessageText:NSLocalizedString(@"Authorization Failed", @"AWS authorization failed alert title")];
+                [alert setInformativeText:NSLocalizedString(@"Failed to create a secure bookmark for the AWS directory. Please try again.", @"AWS authorization failed alert message")];
+                [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+                [alert setAlertStyle:NSAlertStyleWarning];
+                [alert runModal];
+            }
+        }
+    }];
+}
+
+/**
+ * Update UI elements based on AWS directory authorization state
+ */
+- (void)updateAWSAuthorizationUI
+{
+    // Trigger KVO updates for bindings
+    [self willChangeValueForKey:@"isAWSDirectoryAuthorized"];
+    [self didChangeValueForKey:@"isAWSDirectoryAuthorized"];
+
+    [self _syncAWSIAMAndSSLInterfaceState];
+}
+
+/**
+ * Refreshes AWS regions from AWS public metadata with a fallback cache/list.
+ * The async callback updates the bound combo box values via KVO.
+ */
+- (void)_refreshAWSAvailableRegions
+{
+    [AWSIAMAuthManager refreshAWSRegionsIfNeededWithCompletion:^(NSArray<NSString *> *regions) {
+        if (!regions || !regions.count) return;
+        if ([awsAvailableRegionValues isEqualToArray:regions]) return;
+
+        NSString *currentRegion = [[self awsRegion] copy];
+
+        [self willChangeValueForKey:@"awsAvailableRegions"];
+        awsAvailableRegionValues = [regions copy];
+        [self didChangeValueForKey:@"awsAvailableRegions"];
+
+        if (awsRegionComboBox) {
+            [awsRegionComboBox reloadData];
+        }
+
+        if ([currentRegion length]) {
+            [self setAwsRegion:currentRegion];
+        }
+    }];
+}
+
+/**
+ * Returns AWS region identifiers for the IAM region picker.
+ */
+- (NSArray<NSString *> *)awsAvailableRegions
+{
+    return awsAvailableRegionValues ?: [AWSIAMAuthManager cachedOrFallbackRegions];
 }
 
 #pragma mark -
@@ -751,7 +1364,20 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     switch (theType) {
         case SPTCPIPConnection:
             targetResizeRect = [standardConnectionFormContainer frame];
-            if ([self useSSL]) additionalFormHeight += [standardConnectionSSLDetailsContainer frame].size.height;
+            if ([self useSSL]) {
+                additionalFormHeight += [standardConnectionSSLDetailsContainer frame].size.height;
+            }
+            break;
+        case SPAWSIAMConnection:
+            targetResizeRect = [awsIAMConnectionFormContainer frame];
+            // IAM only has one security checkbox and a helper message at the bottom.
+            // Use a smaller footer area to keep its vertical density aligned with the other tabs.
+            additionalFormHeight = 29;
+            break;
+        case SPVaultConnection:
+            targetResizeRect = [vaultConnectionFormContainer frame];
+            additionalFormHeight = 49;
+            if ([self useSSL]) additionalFormHeight += [vaultConnectionSSLDetailsContainer frame].size.height;
             break;
         case SPSocketConnection:
             targetResizeRect = [socketConnectionFormContainer frame];
@@ -771,6 +1397,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     else {
         [connectionResizeContainer setFrame:frameRect];
     }
+
+    // Re-apply scroll layout after every details resize to avoid clipped top rows in small windows.
+    [self scrollViewFrameChanged:nil];
 }
 
 #pragma mark -
@@ -810,6 +1439,17 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 }
 
 /**
+ * Filters the favorites list by the search field's current text.
+ * An empty query restores the full list.
+ */
+- (void)searchFavorites:(id)sender
+{
+    NSString *query = [sender respondsToSelector:@selector(stringValue)] ? [sender stringValue] : @"";
+    self.favoritesListDataSource.searchQuery = query ?: @"";
+    [self.favoritesListDataSource reloadDataIn:favoritesOutlineView];
+}
+
+/**
  * Sets fields for the chosen favorite.
  */
 - (void)updateFavoriteSelection:(id)sender
@@ -830,87 +1470,121 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [connectionResizeContainer setHidden:NO];
     [self _stopEditingConnection];
 
+    // Decode the favorite into typed values. The defaulting rules (missing
+    // name → @"", colorIndex → -1, useCompression → YES, awsProfile →
+    // @"default", …) live in SAConnectionInfo+Favorite.swift and are pinned
+    // by SAConnectionInfoFavoriteTests.
+    SAConnectionInfoObjC *details = [SAConnectionInfoObjC infoFromFavoriteDictionary:fav];
+
     // Set up the type, also storing it in the previous type store to prevent type "changes" triggering actions
-    NSUInteger connectionType = ([fav objectForKey:SPFavoriteTypeKey] ? [[fav objectForKey:SPFavoriteTypeKey] integerValue] : SPTCPIPConnection);
+    NSUInteger connectionType = (NSUInteger)[details type];
     previousType = connectionType;
     [self setType:connectionType];
 
     // Standard details
-    [self setName:([fav objectForKey:SPFavoriteNameKey] ? [fav objectForKey:SPFavoriteNameKey] : @"")];
-    [self setHost:([fav objectForKey:SPFavoriteHostKey] ? [fav objectForKey:SPFavoriteHostKey] : @"")];
-    [self setSocket:([fav objectForKey:SPFavoriteSocketKey] ? [fav objectForKey:SPFavoriteSocketKey] : @"")];
-    [self setUser:([fav objectForKey:SPFavoriteUserKey] ? [fav objectForKey:SPFavoriteUserKey] : @"")];
-    [self setColorIndex:([fav objectForKey:SPFavoriteColorIndexKey]? [[fav objectForKey:SPFavoriteColorIndexKey] integerValue] : -1)];
-    [self setPort:([fav objectForKey:SPFavoritePortKey] ? [fav objectForKey:SPFavoritePortKey] : @"")];
-    [self setDatabase:([fav objectForKey:SPFavoriteDatabaseKey] ? [fav objectForKey:SPFavoriteDatabaseKey] : @"")];
-    [self setUseCompression:([fav objectForKey:SPFavoriteUseCompressionKey] ? [[fav objectForKey:SPFavoriteUseCompressionKey] boolValue] : YES)];
+    [self setName:[details name]];
+    [self setHost:[details host]];
+    [self setSocket:[details socket]];
+    [self setUser:[details user]];
+    [self setColorIndex:[details colorIndex]];
+    [self setPort:[details port]];
+    [self setDatabase:[details database]];
+    [self setUseCompression:[details useCompression]];
 
-    // Time Zone details
-    switch ([fav objectForKey:SPFavoriteTimeZoneModeKey] ? [[fav objectForKey:SPFavoriteTimeZoneModeKey] intValue] : SPConnectionTimeZoneModeUseServerTZ) {
-        case SPConnectionTimeZoneModeUseSystemTZ: {
+    // Time Zone details: sync the per-type popups, then store mode + identifier
+    switch ([details timeZoneMode]) {
+        case SAConnectionTimeZoneModeUseSystemTZ: {
             [standardTimeZoneField selectItemWithTag:SPUseSystemTimeZoneTag];
+            [awsIAMTimeZoneField selectItemWithTag:SPUseSystemTimeZoneTag];
+            [vaultTimeZoneField selectItemWithTag:SPUseSystemTimeZoneTag];
             [socketTimeZoneField selectItemWithTag:SPUseSystemTimeZoneTag];
             [sshTimeZoneField selectItemWithTag:SPUseSystemTimeZoneTag];
-            [self setTimeZoneMode:SPConnectionTimeZoneModeUseSystemTZ];
-            [self setTimeZoneIdentifier:@""];
             break;
         }
-        case SPConnectionTimeZoneModeUseFixedTZ: {
-            NSString *tzIdentifier = [fav objectForKey:SPFavoriteTimeZoneIdentifierKey];
+        case SAConnectionTimeZoneModeUseFixedTZ: {
+            NSString *tzIdentifier = [details timeZoneIdentifier];
             [standardTimeZoneField selectItemWithTitle:tzIdentifier];
+            [awsIAMTimeZoneField selectItemWithTitle:tzIdentifier];
+            [vaultTimeZoneField selectItemWithTitle:tzIdentifier];
             [socketTimeZoneField selectItemWithTitle:tzIdentifier];
             [sshTimeZoneField selectItemWithTitle:tzIdentifier];
-            [self setTimeZoneMode:SPConnectionTimeZoneModeUseFixedTZ];
-            [self setTimeZoneIdentifier:tzIdentifier];
             break;
         }
         default: {
             [standardTimeZoneField selectItemWithTag:SPUseServerTimeZoneTag];
+            [awsIAMTimeZoneField selectItemWithTag:SPUseServerTimeZoneTag];
+            [vaultTimeZoneField selectItemWithTag:SPUseServerTimeZoneTag];
             [socketTimeZoneField selectItemWithTag:SPUseServerTimeZoneTag];
             [sshTimeZoneField selectItemWithTag:SPUseServerTimeZoneTag];
-            [self setTimeZoneMode:SPConnectionTimeZoneModeUseServerTZ];
-            [self setTimeZoneIdentifier:@""];
             break;
         }
     }
+    [self setTimeZoneMode:(SPConnectionTimeZoneMode)[details timeZoneMode]];
+    [self setTimeZoneIdentifier:[details timeZoneIdentifier]];
 
     //Special prefs
-    [self setAllowDataLocalInfile:([fav objectForKey:SPFavoriteAllowDataLocalInfileKey] ? [[fav objectForKey:SPFavoriteAllowDataLocalInfileKey] intValue] : NSControlStateValueOff)];
+    [self setAllowDataLocalInfile:[details allowDataLocalInfile]];
 
     // Clear text plugin
-    [self setEnableClearTextPlugin:([fav objectForKey:SPFavoriteEnableClearTextPluginKey] ? [[fav objectForKey:SPFavoriteEnableClearTextPluginKey] intValue] : NSControlStateValueOff)];
+    [self setEnableClearTextPlugin:[details enableClearTextPlugin]];
+
+    // AWS IAM Authentication (profile-based only - manual credentials not supported)
+    [self setUseAWSIAMAuth:[details useAWSIAMAuth]];
+    [self setAwsRegion:[details awsRegion]];
+    [self setAwsProfile:[details awsProfile]];
+
+    // Vault Authentication
+    [self setVaultHost:[details vaultHost]];
+    // nil is intentional here — the KVO binding shows NSNullPlaceholder ("443"/"oidc")
+    // when the property is nil. The runtime fallback to "443"/"oidc" is applied at
+    // connect time. These two stay as raw dictionary reads because the decoded
+    // info cannot represent the nil-vs-empty distinction the placeholder needs;
+    // rawFavoriteString: coerces NSNumber/NSNull from imported favorites so the
+    // properties are always NSString or nil.
+    [self setVaultPort:[SAConnectionInfoObjC rawFavoriteString:[fav objectForKey:SPFavoriteVaultPortKey]]];
+    [self setVaultOIDCMount:[SAConnectionInfoObjC rawFavoriteString:[fav objectForKey:SPFavoriteVaultOIDCMountKey]]];
+    [self setVaultCredentialsPath:[details vaultCredentialsPath]];
 
     // SSL details
-    [self setUseSSL:([fav objectForKey:SPFavoriteUseSSLKey] ? [[fav objectForKey:SPFavoriteUseSSLKey] intValue] : NSControlStateValueOff)];
-    [self setSslKeyFileLocationEnabled:([fav objectForKey:SPFavoriteSSLKeyFileLocationEnabledKey] ? [[fav objectForKey:SPFavoriteSSLKeyFileLocationEnabledKey] intValue] : NSControlStateValueOff)];
-    [self setSslKeyFileLocation:([fav objectForKey:SPFavoriteSSLKeyFileLocationKey] ? [fav objectForKey:SPFavoriteSSLKeyFileLocationKey] : @"")];
-    [self setSslCertificateFileLocationEnabled:([fav objectForKey:SPFavoriteSSLCertificateFileLocationEnabledKey] ? [[fav objectForKey:SPFavoriteSSLCertificateFileLocationEnabledKey] intValue] : NSControlStateValueOff)];
-    [self setSslCertificateFileLocation:([fav objectForKey:SPFavoriteSSLCertificateFileLocationKey] ? [fav objectForKey:SPFavoriteSSLCertificateFileLocationKey] : @"")];
-    [self setSslCACertFileLocationEnabled:([fav objectForKey:SPFavoriteSSLCACertFileLocationEnabledKey] ? [[fav objectForKey:SPFavoriteSSLCACertFileLocationEnabledKey] intValue] : NSControlStateValueOff)];
-    [self setSslCACertFileLocation:([fav objectForKey:SPFavoriteSSLCACertFileLocationKey] ? [fav objectForKey:SPFavoriteSSLCACertFileLocationKey] : @"")];
+    [self setUseSSL:[details useSSL]];
+    [self setSslKeyFileLocationEnabled:[details sslKeyFileLocationEnabled]];
+    [self setSslKeyFileLocation:[details sslKeyFileLocation]];
+    [self setSslCertificateFileLocationEnabled:[details sslCertificateFileLocationEnabled]];
+    [self setSslCertificateFileLocation:[details sslCertificateFileLocation]];
+    [self setSslCACertFileLocationEnabled:[details sslCACertFileLocationEnabled]];
+    [self setSslCACertFileLocation:[details sslCACertFileLocation]];
 
     // SSH details
-    [self setSshHost:([fav objectForKey:SPFavoriteSSHHostKey] ? [fav objectForKey:SPFavoriteSSHHostKey] : @"")];
-    [self setSshUser:([fav objectForKey:SPFavoriteSSHUserKey] ? [fav objectForKey:SPFavoriteSSHUserKey] : @"")];
-    [self setSshKeyLocationEnabled:([fav objectForKey:SPFavoriteSSHKeyLocationEnabledKey] ? [[fav objectForKey:SPFavoriteSSHKeyLocationEnabledKey] intValue] : NSControlStateValueOff)];
-    [self setSshKeyLocation:([fav objectForKey:SPFavoriteSSHKeyLocationKey] ? [fav objectForKey:SPFavoriteSSHKeyLocationKey] : @"")];
-    [self setSshPort:([fav objectForKey:SPFavoriteSSHPortKey] ? [fav objectForKey:SPFavoriteSSHPortKey] : @"")];
-
-    // Trigger an interface update
-    [self resizeTabViewToConnectionType:[self type] animating:(sender == self)];
+    [self setSshHost:[details sshHost]];
+    [self setSshUser:[details sshUser]];
+    [self setSshKeyLocationEnabled:[details sshKeyLocationEnabled]];
+    [self setSshKeyLocation:[details sshKeyLocation]];
+    [self setSshPort:[details sshPort]];
+    [self setSshRemoteSocketPath:[details sshRemoteSocketPath]];
 
     // Check whether the password exists in the keychain, and if so add it; also record the
     // keychain details so we can pass around only those details if the password doesn't change
-    connectionKeychainItemName = !fav ? nil : [keychain nameForFavoriteName:[fav objectForKey:SPFavoriteNameKey] id:[fav objectForKey:SPFavoriteIDKey]];
-    connectionKeychainItemAccount = !fav ? nil : [keychain accountForUser:[fav objectForKey:SPFavoriteUserKey] host:(([self type] == SPSocketConnection) ? @"localhost" : [fav objectForKey:SPFavoriteHostKey]) database:[fav objectForKey:SPFavoriteDatabaseKey]];
-
-    if(fav) {
-        [self setPassword:[keychain getPasswordForName:connectionKeychainItemName account:connectionKeychainItemAccount]];
-    }
-
-    if (!fav || ![[self password] length]) {
+    if ([self type] == SPVaultConnection) {
+        connectionKeychainItemName = nil;
+        connectionKeychainItemAccount = nil;
         [self setPassword:nil];
+    } else {
+        connectionKeychainItemName = !fav ? nil : [keychain nameForFavoriteName:[fav objectForKey:SPFavoriteNameKey] id:[fav objectForKey:SPFavoriteIDKey]];
+        connectionKeychainItemAccount = !fav ? nil : [keychain accountForUser:[fav objectForKey:SPFavoriteUserKey] host:(([self type] == SPSocketConnection) ? @"localhost" : [fav objectForKey:SPFavoriteHostKey]) database:[fav objectForKey:SPFavoriteDatabaseKey]];
+
+        if(fav) {
+            [self setPassword:[keychain getPasswordForName:connectionKeychainItemName account:connectionKeychainItemAccount]];
+        }
+
+        if (!fav || ![[self password] length]) {
+            [self setPassword:nil];
+        }
     }
+
+    [self _syncAWSIAMAndSSLInterfaceState];
+
+    // Trigger an interface update
+    [self resizeTabViewToConnectionType:[self type] animating:(sender == self)];
 
     // Store the selected favorite ID for use with the document on connection
     if ([fav objectForKey:SPFavoriteIDKey]){
@@ -920,16 +1594,23 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         }
     }
 
-    // And the same for the SSH password
-    connectionSSHKeychainItemName = !fav ? nil : [keychain nameForSSHForFavoriteName:[fav objectForKey:SPFavoriteNameKey] id:[fav objectForKey:SPFavoriteIDKey]];
-    connectionSSHKeychainItemAccount = !fav ? nil : [keychain accountForSSHUser:[fav objectForKey:SPFavoriteSSHUserKey] sshHost:[fav objectForKey:SPFavoriteSSHHostKey]];
-
-    if(fav) {
-        [self setSshPassword:[keychain getPasswordForName:connectionSSHKeychainItemName account:connectionSSHKeychainItemAccount]];
-    }
-
-    if (!fav || ![[self sshPassword] length]) {
+    // And the same for the SSH password. Vault connections do not use SSH
+    // tunnels, so do not hydrate stale SSH keychain entries from old favorites.
+    if ([self type] == SPVaultConnection) {
+        connectionSSHKeychainItemName = nil;
+        connectionSSHKeychainItemAccount = nil;
         [self setSshPassword:nil];
+    } else {
+        connectionSSHKeychainItemName = !fav ? nil : [keychain nameForSSHForFavoriteName:[fav objectForKey:SPFavoriteNameKey] id:[fav objectForKey:SPFavoriteIDKey]];
+        connectionSSHKeychainItemAccount = !fav ? nil : [keychain accountForSSHUser:[fav objectForKey:SPFavoriteSSHUserKey] sshHost:[fav objectForKey:SPFavoriteSSHHostKey]];
+
+        if(fav) {
+            [self setSshPassword:[keychain getPasswordForName:connectionSSHKeychainItemName account:connectionSSHKeychainItemAccount]];
+        }
+
+        if (!fav || ![[self sshPassword] length]) {
+            [self setSshPassword:nil];
+        }
     }
 
     [prefs setInteger:[[fav objectForKey:SPFavoriteIDKey] integerValue] forKey:SPLastFavoriteID];
@@ -945,7 +1626,16 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     switch ([self type])
     {
         case SPTCPIPConnection:
-            [favoritesOutlineView setNextKeyView:(![[standardPasswordField stringValue] length]) ? standardPasswordField : standardNameField];
+        {
+            BOOL shouldFocusPassword = ![[standardPasswordField stringValue] length];
+            [favoritesOutlineView setNextKeyView:shouldFocusPassword ? standardPasswordField : standardNameField];
+            break;
+        }
+        case SPAWSIAMConnection:
+            [favoritesOutlineView setNextKeyView:awsIAMNameField];
+            break;
+        case SPVaultConnection:
+            [favoritesOutlineView setNextKeyView:vaultNameField];
             break;
         case SPSocketConnection:
             [favoritesOutlineView setNextKeyView:(![[socketPasswordField stringValue] length]) ? socketPasswordField : socketNameField];
@@ -1014,58 +1704,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 {
     NSNumber *favoriteID = [self _createNewFavoriteID];
 
-    NSArray *objects = @[
-        NSLocalizedString(@"New Favorite", @"new favorite name"),
-        @0,
-        @"",
-        @"",
-        @"",
-        @(-1),
-        @"",
-        @0,
-        @"",
-        @(NSControlStateValueOff),
-        @(NSControlStateValueOff),
-        @(NSControlStateValueOff),
-        @(NSControlStateValueOff),
-        @(NSControlStateValueOff),
-        @(NSControlStateValueOff),
-        @"",
-        @"",
-        @"",
-        @(NSControlStateValueOff),
-        @"",
-        @"",
-        favoriteID
-    ];
-
-    NSArray *keys = @[
-        SPFavoriteNameKey,
-        SPFavoriteTypeKey,
-        SPFavoriteHostKey,
-        SPFavoriteSocketKey,
-        SPFavoriteUserKey,
-        SPFavoriteColorIndexKey,
-        SPFavoritePortKey,
-        SPFavoriteTimeZoneModeKey,
-        SPFavoriteTimeZoneIdentifierKey,
-        SPFavoriteAllowDataLocalInfileKey,
-        SPFavoriteEnableClearTextPluginKey,
-        SPFavoriteUseSSLKey,
-        SPFavoriteSSLKeyFileLocationEnabledKey,
-        SPFavoriteSSLCertificateFileLocationEnabledKey,
-        SPFavoriteSSLCACertFileLocationEnabledKey,
-        SPFavoriteDatabaseKey,
-        SPFavoriteSSHHostKey,
-        SPFavoriteSSHUserKey,
-        SPFavoriteSSHKeyLocationEnabledKey,
-        SPFavoriteSSHKeyLocationKey,
-        SPFavoriteSSHPortKey,
-        SPFavoriteIDKey
-    ];
-
-    // Create default favorite
-    NSMutableDictionary *favorite = [NSMutableDictionary dictionaryWithObjects:objects forKeys:keys];
+    // Create default favorite (template + wire-format quirks live in
+    // SAConnectionInfo+Favorite.swift, pinned by SAConnectionInfoFavoriteTests)
+    NSMutableDictionary *favorite = [SAConnectionInfoObjC defaultNewFavoriteDictionaryWithID:favoriteID];
 
     SPTreeNode *selectedNode = [self selectedFavoriteNode];
 
@@ -1122,24 +1763,19 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 {
     if ([favoritesOutlineView numberOfSelectedRows] == 1) {
 
-        BOOL suppressWarning = NO;
         SPTreeNode *node = [self selectedFavoriteNode];
 
-        NSString *message = @"";
-        NSString *informativeMessage = @"";
+        // The favorite/group/empty-group wording (and whether to ask at all)
+        // lives in SAFavoriteDeletionPrompt, pinned by unit tests.
+        NSString *nodeDisplayName = [node isGroup]
+            ? [[node representedObject] nodeName]
+            : [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteNameKey];
+        SAFavoriteDeletionPrompt *prompt = [SAFavoriteDeletionPrompt promptForGroup:[node isGroup]
+                                                                               name:nodeDisplayName
+                                                                         childCount:[[node childNodes] count]];
 
-        if (![node isGroup]) {
-            message = [NSString stringWithFormat:NSLocalizedString(@"Delete favorite '%@'?", @"delete database message"), [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteNameKey]];
-            informativeMessage = [NSString stringWithFormat:NSLocalizedString(@"Are you sure you want to delete the favorite '%@'? This operation cannot be undone.", @"delete database informative message"), [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteNameKey]];
-        } else if ([[node childNodes] count] > 0) {
-            message = [NSString stringWithFormat:NSLocalizedString(@"Delete group '%@'?", @"delete database message"), [[node representedObject] nodeName]];
-            informativeMessage = [NSString stringWithFormat:NSLocalizedString(@"Are you sure you want to delete the group '%@'? All groups and favorites within this group will also be deleted. This operation cannot be undone.", @"delete database informative message"), [[node representedObject] nodeName]];
-        } else {
-            suppressWarning = YES;
-        }
-
-        if (!suppressWarning) {
-            [NSAlert createDefaultAlertWithTitle:message message:informativeMessage primaryButtonTitle:NSLocalizedString(@"Delete", @"delete button") primaryButtonHandler:^{
+        if (prompt.needsConfirmation) {
+            [NSAlert createDefaultAlertWithTitle:prompt.title message:prompt.informativeText primaryButtonTitle:NSLocalizedString(@"Delete", @"delete button") primaryButtonHandler:^{
                 [self _removeNode:[self selectedFavoriteNode]];
             } cancelButtonHandler:nil];
         } else {
@@ -1155,15 +1791,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 {
     if ([favoritesOutlineView numberOfSelectedRows] == 1) {
 
-        NSMutableDictionary *favorite = [NSMutableDictionary dictionaryWithDictionary:[self selectedFavorite]];
-
+        // Fresh unique ID + "<name> Copy" (rules in SAConnectionInfo+Favorite.swift)
         NSNumber *favoriteID = [self _createNewFavoriteID];
-
-        // Update the unique ID
-        [favorite setObject:favoriteID forKey:SPFavoriteIDKey];
-
-        // Alter the name for clarity
-        [favorite setObject:[NSString stringWithFormat:NSLocalizedString(@"%@ Copy", @"Initial favourite name after duplicating a previous favourite"), [favorite objectForKey:SPFavoriteNameKey]] forKey:SPFavoriteNameKey];
+        NSMutableDictionary *favorite = [SAConnectionInfoObjC duplicatedFavoriteDictionaryFromFavorite:[self selectedFavorite] withID:favoriteID];
 
         SPTreeNode *selectedNode = [self selectedFavoriteNode];
 
@@ -1203,6 +1833,73 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     return [self _selectNode:quickConnectItem];
 }
 
+- (BOOL)connectionStringComponentsContainDisplaySecrets:(NSURLComponents *)components
+{
+    if (components.password != nil) {
+        return YES;
+    }
+
+    for (NSURLQueryItem *item in components.queryItems ?: @[]) {
+        NSString *lowercaseName = [item.name lowercaseString];
+        if ([lowercaseName isEqualToString:@"ssh_password"] || [lowercaseName isEqualToString:@"password"]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+- (NSString *)redactedConnectionStringForDisplayFromComponents:(NSURLComponents *)components fallback:(NSString *)fallback
+{
+    NSURLComponents *displayComponents = [components copy];
+    displayComponents.user = nil;
+    displayComponents.password = nil;
+
+    if (displayComponents.queryItems.count > 0) {
+        NSMutableArray<NSURLQueryItem *> *redactedQueryItems = [NSMutableArray arrayWithCapacity:displayComponents.queryItems.count];
+        for (NSURLQueryItem *item in displayComponents.queryItems) {
+            NSString *lowercaseName = [item.name lowercaseString];
+            if ([lowercaseName isEqualToString:@"ssh_password"] || [lowercaseName isEqualToString:@"password"]) {
+                [redactedQueryItems addObject:[NSURLQueryItem queryItemWithName:item.name value:@"•••"]];
+            }
+            else {
+                [redactedQueryItems addObject:item];
+            }
+        }
+        displayComponents.queryItems = redactedQueryItems;
+    }
+
+    NSMutableString *displayString = [NSMutableString string];
+
+    if (components.scheme.length) {
+        [displayString appendFormat:@"%@://", components.scheme];
+    }
+
+    if (components.user != nil || components.password != nil) {
+        if (components.percentEncodedUser.length) {
+            [displayString appendString:components.percentEncodedUser];
+        }
+        [displayString appendString:@":•••@"];
+    }
+
+    NSString *urlWithoutUserInfo = [displayComponents string];
+    if (urlWithoutUserInfo.length) {
+        NSString *schemePrefix = components.scheme.length ? [NSString stringWithFormat:@"%@://", components.scheme] : nil;
+        NSString *schemeSeparator = components.scheme.length ? [NSString stringWithFormat:@"%@:", components.scheme] : nil;
+        if (schemePrefix && [urlWithoutUserInfo hasPrefix:schemePrefix]) {
+            [displayString appendString:[urlWithoutUserInfo substringFromIndex:schemePrefix.length]];
+        }
+        else if (schemeSeparator && [urlWithoutUserInfo hasPrefix:schemeSeparator]) {
+            [displayString appendString:[urlWithoutUserInfo substringFromIndex:schemeSeparator.length]];
+        }
+        else {
+            [displayString appendString:urlWithoutUserInfo];
+        }
+    }
+
+    return displayString.length ? displayString : fallback;
+}
+
 #pragma mark -
 #pragma mark Import/export favorites
 
@@ -1211,9 +1908,175 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (IBAction)importFavorites:(id)sender
 {
+    // Check user preference for automatic clipboard checking
+    BOOL autoCheckClipboard = [[NSUserDefaults standardUserDefaults] boolForKey:SPAutoCheckClipboardForConnectionStrings];
+
+    // Check if clipboard contains a MySQL connection string (if preference enabled)
+    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+    NSString *clipboardString = [pasteboard stringForType:NSPasteboardTypeString];
+
+    if (autoCheckClipboard && clipboardString && [[clipboardString lowercaseString] hasPrefix:@"mysql://"]) {
+        // Found a connection string in clipboard - offer to import it
+
+        // Validate URL
+        NSURL *url = [NSURL URLWithString:clipboardString];
+        if (!url) {
+            NSLog(@"Invalid connection string URL in clipboard");
+            [self showImportFilePanel];
+            return;
+        }
+
+        // Use NSURLComponents for proper password handling (handles percent-encoding)
+        NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+        BOOL hasPassword = [self connectionStringComponentsContainDisplaySecrets:components];
+
+        // Create redacted version for display by rebuilding URL from components
+        NSString *displayString = clipboardString;
+        if (hasPassword) {
+            displayString = [self redactedConnectionStringForDisplayFromComponents:components
+                                                                          fallback:NSLocalizedString(@"mysql://[connection string with password hidden]", @"Redacted connection string fallback")];
+        }
+
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert setMessageText:NSLocalizedString(@"Import from Clipboard or File?", @"Import from clipboard or file")];
+
+        if (hasPassword) {
+            // Create accessory view with checkbox to reveal password
+            NSView *accessoryView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 400, 80)];
+
+            NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 55, 400, 20)];
+            [label setStringValue:NSLocalizedString(@"Found connection string in clipboard:", @"Found connection string label")];
+            [label setBezeled:NO];
+            [label setDrawsBackground:NO];
+            [label setEditable:NO];
+            [label setSelectable:NO];
+            [accessoryView addSubview:label];
+
+            NSTextField *urlField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 30, 400, 20)];
+            [urlField setStringValue:displayString];
+            [urlField setBezeled:NO];
+            [urlField setDrawsBackground:NO];
+            [urlField setEditable:NO];
+            [urlField setSelectable:YES];
+            [urlField setFont:[NSFont systemFontOfSize:11]];
+            [accessoryView addSubview:urlField];
+
+            // Use checkbox instead of eye button - simpler and more reliable
+            NSButton *revealCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(0, 5, 200, 20)];
+            [revealCheckbox setButtonType:NSButtonTypeSwitch];
+            [revealCheckbox setTitle:NSLocalizedString(@"Show password", @"Show password checkbox")];
+            [revealCheckbox setState:NSControlStateValueOff];
+
+            // Use target-action with stored context via associated objects
+            objc_setAssociatedObject(revealCheckbox, kOriginalStringKey, clipboardString, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(revealCheckbox, kRedactedStringKey, displayString, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(revealCheckbox, kURLFieldKey, urlField, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+            [revealCheckbox setTarget:self];
+            [revealCheckbox setAction:@selector(togglePasswordVisibility:)];
+
+            [accessoryView addSubview:revealCheckbox];
+
+            [alert setAccessoryView:accessoryView];
+            [alert setInformativeText:NSLocalizedString(@"\nWould you like to import from clipboard or choose a file?", @"Import prompt")];
+        }
+        else {
+            // Use redacted string even when no password to avoid exposing any sensitive data
+            [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Found connection string in clipboard:\n\n%@\n\nWould you like to import from clipboard or choose a file?", @"Import connection string prompt"), displayString]];
+        }
+
+        [alert addButtonWithTitle:NSLocalizedString(@"Import from Clipboard", @"Import from clipboard button")];
+        [alert addButtonWithTitle:NSLocalizedString(@"Choose File...", @"Choose file button")];
+        [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"Cancel button")];
+
+        [alert beginSheetModalForWindow:[dbDocument parentWindowControllerWindow] completionHandler:^(NSModalResponse returnCode) {
+            if (returnCode == NSAlertFirstButtonReturn) {
+                // Import from clipboard
+                [self importFavoritesFromConnectionString:clipboardString];
+            }
+            else if (returnCode == NSAlertSecondButtonReturn) {
+                // Choose file
+                [self showImportFilePanel];
+            }
+        }];
+    }
+    else {
+        // No connection string in clipboard - show file picker
+        [self showImportFilePanel];
+    }
+}
+
+/**
+ * Toggles password visibility in the clipboard import alert.
+ */
+- (void)togglePasswordVisibility:(NSButton *)sender
+{
+    NSString *originalString = objc_getAssociatedObject(sender, kOriginalStringKey);
+    NSString *redactedString = objc_getAssociatedObject(sender, kRedactedStringKey);
+    NSTextField *urlField = objc_getAssociatedObject(sender, kURLFieldKey);
+
+    if (sender.state == NSControlStateValueOn) {
+        // Show password
+        [urlField setStringValue:originalString];
+    } else {
+        // Hide password
+        [urlField setStringValue:redactedString];
+    }
+}
+
+/**
+ * Saves a password to the keychain for a favorite using proper keychain helper methods.
+ */
+- (void)savePassword:(NSString *)password forFavorite:(NSDictionary *)favorite
+{
+    if (!password || password.length == 0) {
+        return;
+    }
+
+    NSString *favoriteName = [favorite objectForKey:SPFavoriteNameKey] ?: @"";
+    NSNumber *favoriteID = [favorite objectForKey:SPFavoriteIDKey] ?: @(-1);
+    NSString *user = [favorite objectForKey:SPFavoriteUserKey] ?: @"";
+    NSString *host = [favorite objectForKey:SPFavoriteHostKey] ?: @"";
+    NSString *database = [favorite objectForKey:SPFavoriteDatabaseKey] ?: @"";
+    NSInteger typeTag = [[favorite objectForKey:SPFavoriteTypeKey] integerValue];
+
+    // Normalize host for keychain (socket connections use "localhost")
+    NSString *hostForKeychain = (typeTag == SPSocketConnection) ? @"localhost" : host;
+
+    // Use keychain helper methods for consistent format
+    NSString *keychainName = [keychain nameForFavoriteName:favoriteName id:[NSString stringWithFormat:@"%@", favoriteID]];
+    NSString *keychainAccount = [keychain accountForUser:user host:hostForKeychain database:database];
+
+    [keychain addPassword:password forName:keychainName account:keychainAccount];
+}
+
+/**
+ * Helper method to save SSH password to keychain for a favorite.
+ * Uses consistent keychain naming format via SPKeychain helper methods.
+ */
+- (void)saveSSHPassword:(NSString *)sshPassword forFavorite:(NSDictionary *)favorite
+{
+    if (!sshPassword || sshPassword.length == 0) {
+        return;
+    }
+
+    NSString *favoriteName = [favorite objectForKey:SPFavoriteNameKey] ?: @"";
+    NSNumber *favoriteID = [favorite objectForKey:SPFavoriteIDKey] ?: @(-1);
+    NSString *sshUser = [favorite objectForKey:SPFavoriteSSHUserKey] ?: @"";
+    NSString *sshHost = [favorite objectForKey:SPFavoriteSSHHostKey] ?: @"";
+
+    // Use keychain helper methods for consistent SSH password format
+    NSString *keychainName = [keychain nameForSSHForFavoriteName:favoriteName id:[NSString stringWithFormat:@"%@", favoriteID]];
+    NSString *keychainAccount = [keychain accountForSSHUser:sshUser sshHost:sshHost];
+
+    [keychain addPassword:sshPassword forName:keychainName account:keychainAccount];
+}
+
+- (void)showImportFilePanel
+{
     NSOpenPanel *openPanel = [NSOpenPanel openPanel];
 
-    [openPanel setAllowedFileTypes:@[@"plist"]];
+    [openPanel setAllowedContentTypes:@[[UTType typeWithFilenameExtension:@"plist"]]];
 
     [openPanel beginSheetModalForWindow:[dbDocument parentWindowControllerWindow] completionHandler:^(NSInteger returnCode)
     {
@@ -1223,6 +2086,476 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
             [importer setDelegate:(NSObject<SPFavoritesImportProtocol> *)self];
 
             [importer importFavoritesFromFileAtPath:[[openPanel URL] path]];
+        }
+    }];
+}
+
+- (void)importFavoritesFromConnectionString:(NSString *)connectionString
+{
+    // Validate connection string using Swift helper
+    NSURL *url = [ConnectionStringParser validateConnectionString:connectionString];
+    if (!url) {
+        NSBeep();
+        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Invalid Connection String", @"Invalid connection string")
+                                     message:NSLocalizedString(@"The connection string is not valid.", @"The connection string is not valid")
+                                    callback:nil];
+        return;
+    }
+
+    // Parse connection string using Swift helper
+    ConnectionStringParseResult *result = [ConnectionStringParser parse:url];
+    NSMutableDictionary *details = [result.details mutableCopy];
+    BOOL autoConnect = result.autoConnect;
+    NSArray<NSString *> *invalidParameters = result.invalidParameters;
+    BOOL parsed = result.success;
+
+    if (!parsed) {
+        NSBeep();
+        if ([invalidParameters count] > 0) {
+            NSArray<NSString *> *validParameters = [ConnectionStringParser validQueryParameters];
+            [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Invalid Connection String", @"Invalid connection string")
+                                         message:[NSString stringWithFormat:@"%@:\n\n%@: %@\n\n%@: %@",
+                                                  NSLocalizedString(@"Error parsing connection string", @"Error parsing connection string"),
+                                                  NSLocalizedString(@"Invalid query parameters given", @"Invalid query parameters given"),
+                                                  [invalidParameters componentsJoinedByString:@", "],
+                                                  NSLocalizedString(@"Allowed query parameters are", @"Allowed query parameters are"),
+                                                  [validParameters componentsJoinedByString:@", "]]
+                                        callback:nil];
+        }
+        return;
+    }
+
+    // Create a favorite from the connection details
+    NSMutableDictionary *favorite = [NSMutableDictionary dictionary];
+
+    // Set a default name based on host
+    NSString *host = [details objectForKey:@"host"] ?: @"localhost";
+    NSString *user = [details objectForKey:@"user"] ?: @"";
+    NSString *database = [details objectForKey:@"database"] ?: @"";
+    NSString *favoriteName = [NSString stringWithFormat:@"%@@%@%@",
+                              user.length ? user : @"",
+                              host,
+                              database.length ? [NSString stringWithFormat:@"/%@", database] : @""];
+    [favorite setObject:favoriteName forKey:SPFavoriteNameKey];
+
+    // Map the connection details to favorite keys
+    if ([details objectForKey:@"host"]) [favorite setObject:[details objectForKey:@"host"] forKey:SPFavoriteHostKey];
+    if ([details objectForKey:@"user"]) [favorite setObject:[details objectForKey:@"user"] forKey:SPFavoriteUserKey];
+    if ([details objectForKey:@"database"]) [favorite setObject:[details objectForKey:@"database"] forKey:SPFavoriteDatabaseKey];
+    // Handle port - can be NSString (from parser) or NSNumber (from other sources)
+    if ([details objectForKey:@"port"]) {
+        id portValue = [details objectForKey:@"port"];
+        if ([portValue isKindOfClass:[NSNumber class]]) {
+            [favorite setObject:[portValue stringValue] forKey:SPFavoritePortKey];
+        } else if ([portValue isKindOfClass:[NSString class]]) {
+            [favorite setObject:portValue forKey:SPFavoritePortKey];
+        }
+    }
+    if ([details objectForKey:@"socket"]) [favorite setObject:[details objectForKey:@"socket"] forKey:SPFavoriteSocketKey];
+
+    // Map connection type using centralized helper
+    NSString *typeString = [details objectForKey:@"type"];
+    NSInteger typeTag = [SPConnectionController favoriteTypeTagForString:typeString];
+    [favorite setObject:@(typeTag) forKey:SPFavoriteTypeKey];
+
+    // Add type-specific parameters
+    if (typeTag == SPSSHTunnelConnection) {
+        if ([details objectForKey:@"ssh_host"]) [favorite setObject:[details objectForKey:@"ssh_host"] forKey:SPFavoriteSSHHostKey];
+        if ([details objectForKey:@"ssh_port"]) [favorite setObject:[details objectForKey:@"ssh_port"] forKey:SPFavoriteSSHPortKey];
+        if ([details objectForKey:@"ssh_user"]) [favorite setObject:[details objectForKey:@"ssh_user"] forKey:SPFavoriteSSHUserKey];
+        if ([details objectForKey:@"ssh_keyLocationEnabled"]) [favorite setObject:[details objectForKey:@"ssh_keyLocationEnabled"] forKey:SPFavoriteSSHKeyLocationEnabledKey];
+        if ([details objectForKey:@"ssh_keyLocation"]) [favorite setObject:[details objectForKey:@"ssh_keyLocation"] forKey:SPFavoriteSSHKeyLocationKey];
+    }
+    else if (typeTag == SPAWSIAMConnection) {
+        if ([details objectForKey:@"aws_region"]) [favorite setObject:[details objectForKey:@"aws_region"] forKey:@"awsRegion"];
+        if ([details objectForKey:@"aws_profile"]) [favorite setObject:[details objectForKey:@"aws_profile"] forKey:@"awsProfile"];
+    }
+
+    // Add cleartext plugin flag if present (for LDAP/cleartext auth)
+    // Check normalized key first (from ConnectionStringParser), then raw key for compatibility
+    id clearTextValue = [details objectForKey:@"enableClearTextPlugin"] ?: [details objectForKey:@"enable_cleartext_plugin"];
+    if (clearTextValue) {
+        BOOL enableClearText = NO;
+        if ([clearTextValue isKindOfClass:[NSNumber class]]) {
+            enableClearText = [clearTextValue boolValue];
+        } else if ([clearTextValue isKindOfClass:[NSString class]]) {
+            enableClearText = ([clearTextValue isEqualToString:@"1"] ||
+                              [[clearTextValue lowercaseString] isEqualToString:@"true"]);
+        }
+        [favorite setObject:@(enableClearText) forKey:SPFavoriteEnableClearTextPluginKey];
+    }
+
+    // Generate unique ID for this favorite
+    NSNumber *favoriteID = [self _createNewFavoriteID];
+    [favorite setObject:favoriteID forKey:SPFavoriteIDKey];
+
+    // Store passwords for later (will be saved to keychain after user confirms action)
+    NSString *passwordFromURL = [details objectForKey:@"password"];
+    NSString *sshPasswordFromURL = [details objectForKey:@"ssh_password"];
+
+    // Check for duplicates (including mode-specific fields for accurate matching)
+    NSString *port = [favorite objectForKey:SPFavoritePortKey] ?: @"";
+    SPTreeNode *duplicateNode = [self findDuplicateFavoriteForHost:host
+                                                              user:user
+                                                          database:database
+                                                              port:port
+                                                              type:typeString
+                                                modeSpecificFields:details];
+
+    if (duplicateNode) {
+        // Found a duplicate - create item and show UI
+        SPDuplicateImportItem *item = [[SPDuplicateImportItem alloc] initWithFavoriteName:favoriteName
+                                                                                      host:host
+                                                                                  favorite:favorite
+                                                                             duplicateNode:duplicateNode];
+
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert setMessageText:NSLocalizedString(@"Duplicate Connection Found", @"Duplicate connection found")];
+        [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"A connection with the same details already exists:\n\n%@\n\nChoose an action:", @"Duplicate connection prompt"), favoriteName]];
+
+        // Add custom accessory view
+        NSView *accessoryView = [SPDuplicateImportHelper createAccessoryViewWithDuplicateItems:@[item]];
+        [alert setAccessoryView:accessoryView];
+
+        [alert addButtonWithTitle:NSLocalizedString(@"Import", @"Import button")];
+        [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"Cancel button")];
+
+        [alert beginSheetModalForWindow:[dbDocument parentWindowControllerWindow] completionHandler:^(NSModalResponse returnCode) {
+            if (returnCode != NSAlertFirstButtonReturn) {
+                // Cancel
+                SPDuplicateActionHandler.shared.items = @[];
+                return;
+            }
+
+            SPTreeNode *selectedNode = nil;
+
+            if (item.action == SPDuplicateActionUpdate) {
+                // Update existing
+                [self updateFavoriteNode:duplicateNode withData:favorite password:passwordFromURL sshPassword:sshPasswordFromURL];
+                selectedNode = duplicateNode;
+            }
+            else if (item.action == SPDuplicateActionCreateNew) {
+                // Create new
+                selectedNode = [self->favoritesController addFavoriteNodeWithData:favorite asChildOfNode:nil];
+                // Save passwords to keychain for new favorite
+                [self savePassword:passwordFromURL forFavorite:favorite];
+                [self saveSSHPassword:sshPasswordFromURL forFavorite:favorite];
+            }
+            // If Skip - do nothing
+
+            if (selectedNode) {
+                if (self->currentSortItem > SPFavoritesSortUnsorted) {
+                    [self _sortFavorites];
+                }
+                [self _reloadFavoritesViewData];
+
+                NSInteger row = [self->favoritesOutlineView rowForItem:selectedNode];
+                if (row >= 0) {
+                    [self->favoritesOutlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
+                    [self _scrollToSelectedNode];
+                }
+            }
+
+            // Clear singleton items to prevent memory leak
+            SPDuplicateActionHandler.shared.items = @[];
+        }];
+    }
+    else {
+        // No duplicate - add normally
+        SPTreeNode *newNode = [favoritesController addFavoriteNodeWithData:favorite asChildOfNode:nil];
+
+        // Save passwords to keychain
+        [self savePassword:passwordFromURL forFavorite:favorite];
+        [self saveSSHPassword:sshPasswordFromURL forFavorite:favorite];
+
+        if (currentSortItem > SPFavoritesSortUnsorted) {
+            [self _sortFavorites];
+        }
+
+        [self _reloadFavoritesViewData];
+
+        // Select and scroll to the new favorite
+        NSInteger row = [favoritesOutlineView rowForItem:newNode];
+        if (row >= 0) {
+            [favoritesOutlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
+            [self _scrollToSelectedNode];
+        }
+    }
+}
+
+- (SPTreeNode *)findDuplicateFavoriteForHost:(NSString *)host
+                                         user:(NSString *)user
+                                     database:(NSString *)database
+                                         port:(NSString *)port
+                                         type:(NSString *)type
+{
+    return [self findDuplicateFavoriteForHost:host user:user database:database port:port type:type modeSpecificFields:nil];
+}
+
+- (SPTreeNode *)findDuplicateFavoriteForHost:(NSString *)host
+                                         user:(NSString *)user
+                                     database:(NSString *)database
+                                         port:(NSString *)port
+                                         type:(NSString *)type
+                              modeSpecificFields:(NSDictionary *)modeFields
+{
+    // Get all favorite leaves
+    NSArray *allFavorites = [favoritesRoot allChildLeafs];
+
+    for (SPTreeNode *node in allFavorites) {
+        if ([node isGroup]) continue;
+
+        NSDictionary *favoriteDict = [[node representedObject] nodeFavorite];
+        if (!favoriteDict) continue;
+
+        // Compare key fields
+        NSString *existingHost = [favoriteDict objectForKey:SPFavoriteHostKey] ?: @"";
+        NSString *existingUser = [favoriteDict objectForKey:SPFavoriteUserKey] ?: @"";
+        NSString *existingDatabase = [favoriteDict objectForKey:SPFavoriteDatabaseKey] ?: @"";
+        NSString *existingPort = [favoriteDict objectForKey:SPFavoritePortKey] ?: @"";
+
+        // Get type string using centralized helper
+        NSInteger existingTypeInt = [[favoriteDict objectForKey:SPFavoriteTypeKey] integerValue];
+        NSString *existingType = [SPConnectionController stringForFavoriteTypeTag:existingTypeInt];
+        NSString *normalizedExistingPort = [SPConnectionController normalizedPortForDuplicateComparison:existingPort type:existingType];
+        NSString *normalizedNewPort = [SPConnectionController normalizedPortForDuplicateComparison:port type:type];
+
+        // Check if basic fields match
+        if (![existingHost isEqualToString:host] ||
+            ![existingUser isEqualToString:user] ||
+            ![existingDatabase isEqualToString:database] ||
+            ![normalizedExistingPort isEqualToString:normalizedNewPort] ||
+            ![existingType isEqualToString:type]) {
+            continue;
+        }
+
+        // If mode-specific fields were provided, compare them too
+        if (modeFields) {
+            NSInteger typeTag = [SPConnectionController favoriteTypeTagForString:type];
+
+            if (typeTag == SPSSHTunnelConnection) {
+                // Compare SSH-specific fields
+                NSString *existingSSHHost = [favoriteDict objectForKey:SPFavoriteSSHHostKey] ?: @"";
+                NSString *existingSSHUser = [favoriteDict objectForKey:SPFavoriteSSHUserKey] ?: @"";
+                NSString *existingSSHPort = [favoriteDict objectForKey:SPFavoriteSSHPortKey] ?: @"";
+
+                // Check both URL keys (from connection string) and favorite keys (from plist import)
+                NSString *newSSHHost = [modeFields objectForKey:@"ssh_host"] ?: [modeFields objectForKey:SPFavoriteSSHHostKey] ?: @"";
+                NSString *newSSHUser = [modeFields objectForKey:@"ssh_user"] ?: [modeFields objectForKey:SPFavoriteSSHUserKey] ?: @"";
+                NSString *newSSHPort = [modeFields objectForKey:@"ssh_port"] ?: [modeFields objectForKey:SPFavoriteSSHPortKey] ?: @"";
+
+                if (![existingSSHHost isEqualToString:newSSHHost] ||
+                    ![existingSSHUser isEqualToString:newSSHUser] ||
+                    ![existingSSHPort isEqualToString:newSSHPort]) {
+                    continue;
+                }
+            }
+            else if (typeTag == SPSocketConnection) {
+                // Compare socket path
+                NSString *existingSocket = [favoriteDict objectForKey:SPFavoriteSocketKey] ?: @"";
+                // Check both URL key (from connection string) and favorite key (from plist import)
+                NSString *newSocket = [modeFields objectForKey:@"socket"] ?: [modeFields objectForKey:SPFavoriteSocketKey] ?: @"";
+
+                if (![existingSocket isEqualToString:newSocket]) {
+                    continue;
+                }
+            }
+            else if (typeTag == SPAWSIAMConnection) {
+                // Compare AWS-specific fields
+                NSString *existingRegion = [favoriteDict objectForKey:@"awsRegion"] ?: @"";
+                NSString *existingProfile = [favoriteDict objectForKey:@"awsProfile"] ?: @"";
+
+                // Check both URL keys (from connection string) and favorite keys (from plist import)
+                NSString *newRegion = [modeFields objectForKey:@"aws_region"] ?: [modeFields objectForKey:@"awsRegion"] ?: @"";
+                NSString *newProfile = [modeFields objectForKey:@"aws_profile"] ?: [modeFields objectForKey:@"awsProfile"] ?: @"";
+
+                if (![existingRegion isEqualToString:newRegion] ||
+                    ![existingProfile isEqualToString:newProfile]) {
+                    continue;
+                }
+            }
+        }
+
+        // All fields match - this is a duplicate
+        return node;
+    }
+
+    return nil;
+}
+
+- (void)updateFavoriteNode:(SPTreeNode *)node withData:(NSDictionary *)newData password:(NSString *)password
+{
+    [self updateFavoriteNode:node withData:newData password:password sshPassword:nil];
+}
+
+- (void)updateFavoriteNode:(SPTreeNode *)node withData:(NSDictionary *)newData password:(NSString *)password sshPassword:(NSString *)sshPassword
+{
+    id representedObject = [node representedObject];
+    if (![representedObject respondsToSelector:@selector(nodeFavorite)]) return;
+
+    NSMutableDictionary *favoriteDict = [[representedObject nodeFavorite] mutableCopy];
+    if (!favoriteDict) return;
+
+    // Get old values for keychain update
+    NSString *oldHost = [favoriteDict objectForKey:SPFavoriteHostKey] ?: @"";
+    NSString *oldUser = [favoriteDict objectForKey:SPFavoriteUserKey] ?: @"";
+    NSString *oldDatabase = [favoriteDict objectForKey:SPFavoriteDatabaseKey] ?: @"";
+    NSString *oldName = [favoriteDict objectForKey:SPFavoriteNameKey] ?: @"";
+    NSNumber *favoriteID = [favoriteDict objectForKey:SPFavoriteIDKey] ?: @(-1);
+    NSInteger oldTypeTag = [[favoriteDict objectForKey:SPFavoriteTypeKey] integerValue];
+    NSString *oldSSHUser = [favoriteDict objectForKey:SPFavoriteSSHUserKey] ?: @"";
+    NSString *oldSSHHost = [favoriteDict objectForKey:SPFavoriteSSHHostKey] ?: @"";
+
+    // Update all fields from newData (except name and ID - keep existing name and ID)
+    for (NSString *key in newData) {
+        if (![key isEqualToString:SPFavoriteNameKey] && ![key isEqualToString:SPFavoriteIDKey]) {
+            [favoriteDict setObject:[newData objectForKey:key] forKey:key];
+        }
+    }
+
+    // Get new values
+    NSString *newHost = [favoriteDict objectForKey:SPFavoriteHostKey] ?: @"";
+    NSString *newUser = [favoriteDict objectForKey:SPFavoriteUserKey] ?: @"";
+    NSString *newDatabase = [favoriteDict objectForKey:SPFavoriteDatabaseKey] ?: @"";
+    NSString *newName = [favoriteDict objectForKey:SPFavoriteNameKey] ?: @"";
+    NSInteger newTypeTag = [[favoriteDict objectForKey:SPFavoriteTypeKey] integerValue];
+
+    // Normalize host for keychain (socket connections use "localhost")
+    NSString *oldHostForKeychain = (oldTypeTag == SPSocketConnection) ? @"localhost" : oldHost;
+    NSString *newHostForKeychain = (newTypeTag == SPSocketConnection) ? @"localhost" : newHost;
+
+    // Use keychain helper methods for consistent format
+    NSString *oldKeychainName = [keychain nameForFavoriteName:oldName id:[NSString stringWithFormat:@"%@", favoriteID]];
+    NSString *oldKeychainAccount = [keychain accountForUser:oldUser host:oldHostForKeychain database:oldDatabase];
+    NSString *newKeychainName = [keychain nameForFavoriteName:newName id:[NSString stringWithFormat:@"%@", favoriteID]];
+    NSString *newKeychainAccount = [keychain accountForUser:newUser host:newHostForKeychain database:newDatabase];
+
+    // Update keychain if account changed or new password provided
+    BOOL accountChanged = ![oldKeychainAccount isEqualToString:newKeychainAccount];
+    BOOL hasNewPassword = (password && password.length > 0);
+
+    if (accountChanged || hasNewPassword) {
+        // Try to get existing password
+        NSString *existingPassword = [keychain getPasswordForName:oldKeychainName account:oldKeychainAccount];
+
+        // Determine which password to save
+        NSString *passwordToSave = hasNewPassword ? password : existingPassword;
+
+        if (passwordToSave && passwordToSave.length > 0) {
+            if ([keychain passwordExistsForName:oldKeychainName account:oldKeychainAccount]) {
+                // Update existing keychain entry
+                [keychain updateItemWithName:oldKeychainName
+                                     account:oldKeychainAccount
+                                      toName:newKeychainName
+                                     account:newKeychainAccount
+                                    password:passwordToSave];
+            } else {
+                // Create new keychain entry
+                [keychain addPassword:passwordToSave
+                              forName:newKeychainName
+                              account:newKeychainAccount];
+            }
+        } else if (accountChanged && existingPassword) {
+            // No password to save but account changed - delete old entry
+            [keychain deletePasswordForName:oldKeychainName account:oldKeychainAccount];
+        }
+    }
+
+    // Update SSH password if this is an SSH connection
+    if (newTypeTag == SPSSHTunnelConnection) {
+        NSString *newSSHUser = [favoriteDict objectForKey:SPFavoriteSSHUserKey] ?: @"";
+        NSString *newSSHHost = [favoriteDict objectForKey:SPFavoriteSSHHostKey] ?: @"";
+
+        NSString *oldSSHKeychainName = [keychain nameForSSHForFavoriteName:oldName id:[NSString stringWithFormat:@"%@", favoriteID]];
+        NSString *oldSSHKeychainAccount = [keychain accountForSSHUser:oldSSHUser sshHost:oldSSHHost];
+        NSString *newSSHKeychainName = [keychain nameForSSHForFavoriteName:newName id:[NSString stringWithFormat:@"%@", favoriteID]];
+        NSString *newSSHKeychainAccount = [keychain accountForSSHUser:newSSHUser sshHost:newSSHHost];
+
+        BOOL sshAccountChanged = ![oldSSHKeychainAccount isEqualToString:newSSHKeychainAccount];
+        BOOL hasNewSSHPassword = (sshPassword && sshPassword.length > 0);
+
+        if (sshAccountChanged || hasNewSSHPassword) {
+            NSString *existingSSHPassword = [keychain getPasswordForName:oldSSHKeychainName account:oldSSHKeychainAccount];
+            NSString *sshPasswordToSave = hasNewSSHPassword ? sshPassword : existingSSHPassword;
+
+            if (sshPasswordToSave && sshPasswordToSave.length > 0) {
+                if ([keychain passwordExistsForName:oldSSHKeychainName account:oldSSHKeychainAccount]) {
+                    [keychain updateItemWithName:oldSSHKeychainName
+                                         account:oldSSHKeychainAccount
+                                          toName:newSSHKeychainName
+                                         account:newSSHKeychainAccount
+                                        password:sshPasswordToSave];
+                } else {
+                    [keychain addPassword:sshPasswordToSave
+                                  forName:newSSHKeychainName
+                                  account:newSSHKeychainAccount];
+                }
+            } else if (sshAccountChanged && existingSSHPassword) {
+                [keychain deletePasswordForName:oldSSHKeychainName account:oldSSHKeychainAccount];
+            }
+        }
+    }
+
+    // Update the node's data
+    if ([representedObject respondsToSelector:@selector(setNodeFavorite:)]) {
+        [representedObject setNodeFavorite:favoriteDict];
+    }
+
+    // Save favorites
+    [favoritesController saveFavorites];
+    [[NSNotificationCenter defaultCenter] postNotificationName:SPConnectionFavoritesChangedNotification object:self];
+}
+
+/**
+ * Copies the connection string of the selected favorite to the clipboard.
+ */
+- (IBAction)copyConnectionString:(id)sender
+{
+    SPTreeNode *node = [self selectedFavoriteNode];
+
+    if (!node || [node isGroup]) {
+        NSBeep();
+        return;
+    }
+
+    // Show dialog with password option
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:NSLocalizedString(@"Copy Connection String", @"Copy connection string")];
+    [alert setInformativeText:NSLocalizedString(@"Would you like to include the password in the connection string?\n\n⚠️ WARNING: Sharing passwords in plaintext (Slack, email, etc.) is a security risk!\n\nOnly include the password if you're sharing through a secure channel.", @"Copy connection string password warning")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Copy Without Password", @"Copy without password button")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Copy With Password", @"Copy with password button")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"Cancel button")];
+    [alert setAlertStyle:NSAlertStyleWarning];
+
+    [alert beginSheetModalForWindow:[dbDocument parentWindowControllerWindow] completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSAlertThirdButtonReturn) {
+            // Cancel
+            return;
+        }
+
+        BOOL includePassword = (returnCode == NSAlertSecondButtonReturn);
+        id nodeObject = [node representedObject];
+        NSString *connectionString = nil;
+
+        if ([nodeObject respondsToSelector:@selector(toConnectionString:)]) {
+            connectionString = [nodeObject toConnectionString:includePassword];
+        }
+
+        if (connectionString && [connectionString length] > 0) {
+            NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+            [pasteboard clearContents];
+            [pasteboard setString:connectionString forType:NSPasteboardTypeString];
+
+            // Show brief success message
+            NSString *message = includePassword ?
+                NSLocalizedString(@"Connection string with password copied to clipboard", @"Connection string with password copied") :
+                NSLocalizedString(@"Connection string copied to clipboard (password not included)", @"Connection string copied without password");
+
+            // You could add a toast notification here if available
+            SPLog(@"%@", message);
+        } else {
+            NSBeep();
+            NSLog(@"Failed to generate connection string for favorite");
         }
     }];
 }
@@ -1283,8 +2616,10 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     }
 
     [standardTimeZoneField selectItemAtIndex:sender.indexOfSelectedItem];
+    [awsIAMTimeZoneField selectItemAtIndex:sender.indexOfSelectedItem];
     [sshTimeZoneField selectItemAtIndex:sender.indexOfSelectedItem];
     [socketTimeZoneField selectItemAtIndex:sender.indexOfSelectedItem];
+    [vaultTimeZoneField selectItemAtIndex:sender.indexOfSelectedItem];
 
     [self _startEditingConnection];
 }
@@ -1331,9 +2666,35 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         [[connectionView window] endEditingFor:[[connectionView window] firstResponder]];
     }
 
-    // Ensure that host is not empty if this is a TCP/IP or SSH connection
-    if (validateDetails && ([self type] == SPTCPIPConnection || [self type] == SPSSHTunnelConnection) && ![[self host] length]) {
+    // Ensure that host is not empty for connection types that require a MySQL host.
+    if (validateDetails && [self _shouldRequireMySQLHost] && ![[self host] length]) {
         [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message") message:NSLocalizedString(@"Insufficient details provided to establish a connection. Please provide at least a host.", @"insufficient details informative message") callback:nil];
+        return;
+    }
+
+    if (validateDetails && [self _isAWSIAMConnection] && ![self isAWSDirectoryAuthorized]) {
+        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"AWS Authorization Required", @"AWS authorization required title")
+                                     message:NSLocalizedString(@"Authorize access to your ~/.aws directory before saving an AWS IAM favorite.", @"AWS authorization required save message")
+                                    callback:nil];
+        return;
+    }
+
+    if (validateDetails && [self type] == SPVaultConnection && ![[self host] length]) {
+        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                     message:NSLocalizedString(@"Please provide a database host to save a Vault favorite.", @"vault db host required save message")
+                                    callback:nil];
+        return;
+    }
+    if (validateDetails && [self type] == SPVaultConnection && ![[self vaultHost] length]) {
+        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                     message:NSLocalizedString(@"A Vault host is required to save a Vault favorite.", @"vault host required save message")
+                                    callback:nil];
+        return;
+    }
+    if (validateDetails && [self type] == SPVaultConnection && ![[self vaultCredentialsPath] length]) {
+        [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Insufficient connection details", @"insufficient details message")
+                                     message:NSLocalizedString(@"A Vault credentials path is required to save a Vault favorite.", @"vault creds path required save message")
+                                    callback:nil];
         return;
     }
 
@@ -1388,6 +2749,16 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [theFavorite setObject:[NSNumber numberWithInteger:[self allowDataLocalInfile]] forKey:SPFavoriteAllowDataLocalInfileKey];
     // Clear text plugin
     [theFavorite setObject:[NSNumber numberWithInteger:[self enableClearTextPlugin]] forKey:SPFavoriteEnableClearTextPluginKey];
+    // AWS IAM Authentication (profile-based only)
+    NSInteger awsIAMEnabled = ([self type] == SPAWSIAMConnection) ? NSControlStateValueOn : NSControlStateValueOff;
+    [theFavorite setObject:[NSNumber numberWithInteger:awsIAMEnabled] forKey:SPFavoriteUseAWSIAMAuthKey];
+    _setOrRemoveKey(SPFavoriteAWSRegionKey, [self awsRegion]);
+    _setOrRemoveKey(SPFavoriteAWSProfileKey, [self awsProfile]);
+    // Vault Authentication
+    _setOrRemoveKey(SPFavoriteVaultHostKey, [self vaultHost]);
+    _setOrRemoveKey(SPFavoriteVaultPortKey, [self vaultPort]);
+    _setOrRemoveKey(SPFavoriteVaultOIDCMountKey, [self vaultOIDCMount]);
+    _setOrRemoveKey(SPFavoriteVaultCredentialsPathKey, [self vaultCredentialsPath]);
     // SSL details
     [theFavorite setObject:[NSNumber numberWithInteger:[self useSSL]] forKey:SPFavoriteUseSSLKey];
     [theFavorite setObject:[NSNumber numberWithInteger:[self sslKeyFileLocationEnabled]] forKey:SPFavoriteSSLKeyFileLocationEnabledKey];
@@ -1397,12 +2768,23 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [theFavorite setObject:[NSNumber numberWithInteger:[self sslCACertFileLocationEnabled]] forKey:SPFavoriteSSLCACertFileLocationEnabledKey];
     _setOrRemoveKey(SPFavoriteSSLCACertFileLocationKey, [self sslCACertFileLocation]);
 
-    // SSH details
-    _setOrRemoveKey(SPFavoriteSSHHostKey, [self sshHost]);
-    _setOrRemoveKey(SPFavoriteSSHUserKey, [self sshUser]);
-    _setOrRemoveKey(SPFavoriteSSHPortKey, [self sshPort]);
-    [theFavorite setObject:[NSNumber numberWithInteger:[self sshKeyLocationEnabled]] forKey:SPFavoriteSSHKeyLocationEnabledKey];
-    _setOrRemoveKey(SPFavoriteSSHKeyLocationKey, [self sshKeyLocation]);
+    // SSH details. Vault credentials are generated directly from Vault and
+    // cannot be combined with an SSH tunnel; remove stale SSH favorite fields.
+    if ([self type] == SPVaultConnection) {
+        [theFavorite removeObjectForKey:SPFavoriteSSHHostKey];
+        [theFavorite removeObjectForKey:SPFavoriteSSHUserKey];
+        [theFavorite removeObjectForKey:SPFavoriteSSHPortKey];
+        [theFavorite removeObjectForKey:SPFavoriteSSHKeyLocationEnabledKey];
+        [theFavorite removeObjectForKey:SPFavoriteSSHKeyLocationKey];
+        [theFavorite removeObjectForKey:SPFavoriteSSHRemoteSocketPathKey];
+    } else {
+        _setOrRemoveKey(SPFavoriteSSHHostKey, [self sshHost]);
+        _setOrRemoveKey(SPFavoriteSSHUserKey, [self sshUser]);
+        _setOrRemoveKey(SPFavoriteSSHPortKey, [self sshPort]);
+        [theFavorite setObject:[NSNumber numberWithInteger:[self sshKeyLocationEnabled]] forKey:SPFavoriteSSHKeyLocationEnabledKey];
+        _setOrRemoveKey(SPFavoriteSSHKeyLocationKey, [self sshKeyLocation]);
+        _setOrRemoveKey(SPFavoriteSSHRemoteSocketPathKey, [self sshRemoteSocketPath]);
+    }
 
 
     /*
@@ -1412,82 +2794,100 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     NSString *oldHostnameForPassword = ([[currentFavorite objectForKey:SPFavoriteTypeKey] integerValue] == SPSocketConnection) ? @"localhost" : [currentFavorite objectForKey:SPFavoriteHostKey];
     NSString *newHostnameForPassword = ([self type] == SPSocketConnection) ? @"localhost" : [self host];
 
-    // Grab the password for this connection
-    // Add the password to keychain as appropriate
-    NSString *sqlPassword = [self password];
-    if (![sqlPassword length] && mySQLConnection && connectionKeychainItemName) {
-        sqlPassword = [keychain getPasswordForName:connectionKeychainItemName account:connectionKeychainItemAccount];
-    }
-
-    // If creating a new favourite, always add the password to the keychain if it's set
-    if (createNewFavorite && [sqlPassword length]) {
-        [keychain addPassword:sqlPassword
-                      forName:[keychain nameForFavoriteName:[theFavorite objectForKey:SPFavoriteNameKey] id:[theFavorite objectForKey:SPFavoriteIDKey]]
-                      account:[keychain accountForUser:[self user] host:newHostnameForPassword database:[self database]]];
-    }
-
-    // If not creating a new favourite...
-    if (!createNewFavorite) {
-
-        // Get the old keychain name and account strings
-        oldKeychainName = [keychain nameForFavoriteName:[currentFavorite objectForKey:SPFavoriteNameKey] id:[currentFavorite objectForKey:SPFavoriteIDKey]];
-        oldKeychainAccount = [keychain accountForUser:[currentFavorite objectForKey:SPFavoriteUserKey] host:oldHostnameForPassword database:[currentFavorite objectForKey:SPFavoriteDatabaseKey]];
-
-        // If there's no new password, remove the old item from the keychain
-        if (![sqlPassword length]) {
+    if ([self type] == SPVaultConnection) {
+        // Vault credentials are generated at connect time; remove any static SQL password from the previous favorite type.
+        if (!createNewFavorite) {
+            oldKeychainName = [keychain nameForFavoriteName:[currentFavorite objectForKey:SPFavoriteNameKey] id:[currentFavorite objectForKey:SPFavoriteIDKey]];
+            oldKeychainAccount = [keychain accountForUser:[currentFavorite objectForKey:SPFavoriteUserKey] host:oldHostnameForPassword database:[currentFavorite objectForKey:SPFavoriteDatabaseKey]];
             [keychain deletePasswordForName:oldKeychainName account:oldKeychainAccount];
+        }
+    } else {
+        // Grab the password for this connection
+        // Add the password to keychain as appropriate
+        NSString *sqlPassword = [self password];
+        if (![sqlPassword length] && mySQLConnection && connectionKeychainItemName) {
+            sqlPassword = [keychain getPasswordForName:connectionKeychainItemName account:connectionKeychainItemAccount];
+        }
 
-        // Otherwise, set up the new keychain name and account strings and create or edit the item
-        } else {
-            newKeychainName = [keychain nameForFavoriteName:[theFavorite objectForKey:SPFavoriteNameKey] id:[theFavorite objectForKey:SPFavoriteIDKey]];
-            newKeychainAccount = [keychain accountForUser:[self user] host:newHostnameForPassword database:[self database]];
-            if ([keychain passwordExistsForName:oldKeychainName account:oldKeychainAccount]) {
-                [keychain updateItemWithName:oldKeychainName account:oldKeychainAccount toName:newKeychainName account:newKeychainAccount password:sqlPassword];
+        // If creating a new favourite, always add the password to the keychain if it's set
+        if (createNewFavorite && [sqlPassword length]) {
+            [keychain addPassword:sqlPassword
+                          forName:[keychain nameForFavoriteName:[theFavorite objectForKey:SPFavoriteNameKey] id:[theFavorite objectForKey:SPFavoriteIDKey]]
+                          account:[keychain accountForUser:[self user] host:newHostnameForPassword database:[self database]]];
+        }
+
+        // If not creating a new favourite...
+        if (!createNewFavorite) {
+
+            // Get the old keychain name and account strings
+            oldKeychainName = [keychain nameForFavoriteName:[currentFavorite objectForKey:SPFavoriteNameKey] id:[currentFavorite objectForKey:SPFavoriteIDKey]];
+            oldKeychainAccount = [keychain accountForUser:[currentFavorite objectForKey:SPFavoriteUserKey] host:oldHostnameForPassword database:[currentFavorite objectForKey:SPFavoriteDatabaseKey]];
+
+            // If there's no new password, remove the old item from the keychain
+            if (![sqlPassword length]) {
+                [keychain deletePasswordForName:oldKeychainName account:oldKeychainAccount];
+
+            // Otherwise, set up the new keychain name and account strings and create or edit the item
             } else {
-                [keychain addPassword:sqlPassword forName:newKeychainName account:newKeychainAccount];
+                newKeychainName = [keychain nameForFavoriteName:[theFavorite objectForKey:SPFavoriteNameKey] id:[theFavorite objectForKey:SPFavoriteIDKey]];
+                newKeychainAccount = [keychain accountForUser:[self user] host:newHostnameForPassword database:[self database]];
+                if ([keychain passwordExistsForName:oldKeychainName account:oldKeychainAccount]) {
+                    [keychain updateItemWithName:oldKeychainName account:oldKeychainAccount toName:newKeychainName account:newKeychainAccount password:sqlPassword];
+                } else {
+                    [keychain addPassword:sqlPassword forName:newKeychainName account:newKeychainAccount];
+                }
             }
         }
+        sqlPassword = nil;
     }
-    sqlPassword = nil;
 
     /*
      * Password handling for the SSH connection
      */
-    NSString *theSSHPassword = [self sshPassword];
-    if (mySQLConnection && connectionSSHKeychainItemName) {
-        theSSHPassword = [keychain getPasswordForName:connectionSSHKeychainItemName account:connectionSSHKeychainItemAccount];
-    }
-
-    // If creating a new favourite, always add the password if it's set
-    if (createNewFavorite && [theSSHPassword length]) {
-        [keychain addPassword:theSSHPassword
-                      forName:[keychain nameForSSHForFavoriteName:[theFavorite objectForKey:SPFavoriteNameKey] id:[theFavorite objectForKey:SPFavoriteIDKey]]
-                      account:[keychain accountForSSHUser:[self sshUser] sshHost:[self sshHost]]];
-    }
-
-    // If not creating a new favourite...
-    if (!createNewFavorite) {
-
-        // Get the old keychain name and account strings
-        oldKeychainName = [keychain nameForSSHForFavoriteName:[currentFavorite objectForKey:SPFavoriteNameKey] id:[currentFavorite objectForKey:SPFavoriteIDKey]];
-        oldKeychainAccount = [keychain accountForSSHUser:[currentFavorite objectForKey:SPFavoriteSSHUserKey] sshHost:[currentFavorite objectForKey:SPFavoriteSSHHostKey]];
-
-        // If there's no new password, remove the old item from the keychain
-        if (![theSSHPassword length]) {
+    if ([self type] == SPVaultConnection) {
+        // Remove any SSH password left behind when converting an SSH favorite to Vault.
+        if (!createNewFavorite) {
+            oldKeychainName = [keychain nameForSSHForFavoriteName:[currentFavorite objectForKey:SPFavoriteNameKey] id:[currentFavorite objectForKey:SPFavoriteIDKey]];
+            oldKeychainAccount = [keychain accountForSSHUser:[currentFavorite objectForKey:SPFavoriteSSHUserKey] sshHost:[currentFavorite objectForKey:SPFavoriteSSHHostKey]];
             [keychain deletePasswordForName:oldKeychainName account:oldKeychainAccount];
+        }
+    } else {
+        NSString *theSSHPassword = [self sshPassword];
+        if (mySQLConnection && connectionSSHKeychainItemName) {
+            theSSHPassword = [keychain getPasswordForName:connectionSSHKeychainItemName account:connectionSSHKeychainItemAccount];
+        }
 
-        // Otherwise, set up the new keychain name and account strings and create or edit the item
-        } else {
-            newKeychainName = [keychain nameForSSHForFavoriteName:[theFavorite objectForKey:SPFavoriteNameKey] id:[theFavorite objectForKey:SPFavoriteIDKey]];
-            newKeychainAccount = [keychain accountForSSHUser:[self sshUser] sshHost:[self sshHost]];
-            if ([keychain passwordExistsForName:oldKeychainName account:oldKeychainAccount]) {
-                [keychain updateItemWithName:oldKeychainName account:oldKeychainAccount toName:newKeychainName account:newKeychainAccount password:theSSHPassword];
+        // If creating a new favourite, always add the password if it's set
+        if (createNewFavorite && [theSSHPassword length]) {
+            [keychain addPassword:theSSHPassword
+                          forName:[keychain nameForSSHForFavoriteName:[theFavorite objectForKey:SPFavoriteNameKey] id:[theFavorite objectForKey:SPFavoriteIDKey]]
+                          account:[keychain accountForSSHUser:[self sshUser] sshHost:[self sshHost]]];
+        }
+
+        // If not creating a new favourite...
+        if (!createNewFavorite) {
+
+            // Get the old keychain name and account strings
+            oldKeychainName = [keychain nameForSSHForFavoriteName:[currentFavorite objectForKey:SPFavoriteNameKey] id:[currentFavorite objectForKey:SPFavoriteIDKey]];
+            oldKeychainAccount = [keychain accountForSSHUser:[currentFavorite objectForKey:SPFavoriteSSHUserKey] sshHost:[currentFavorite objectForKey:SPFavoriteSSHHostKey]];
+
+            // If there's no new password, remove the old item from the keychain
+            if (![theSSHPassword length]) {
+                [keychain deletePasswordForName:oldKeychainName account:oldKeychainAccount];
+
+            // Otherwise, set up the new keychain name and account strings and create or edit the item
             } else {
-                [keychain addPassword:theSSHPassword forName:newKeychainName account:newKeychainAccount];
+                newKeychainName = [keychain nameForSSHForFavoriteName:[theFavorite objectForKey:SPFavoriteNameKey] id:[theFavorite objectForKey:SPFavoriteIDKey]];
+                newKeychainAccount = [keychain accountForSSHUser:[self sshUser] sshHost:[self sshHost]];
+                if ([keychain passwordExistsForName:oldKeychainName account:oldKeychainAccount]) {
+                    [keychain updateItemWithName:oldKeychainName account:oldKeychainAccount toName:newKeychainName account:newKeychainAccount password:theSSHPassword];
+                } else {
+                    [keychain addPassword:theSSHPassword forName:newKeychainName account:newKeychainAccount];
+                }
             }
         }
+        theSSHPassword = nil;
     }
-    theSSHPassword = nil;
 
     /*
      * Saving the connection
@@ -1670,6 +3070,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 - (void)_favoriteTypeDidChange {
 
+    [self setUseAWSIAMAuth:([self type] == SPAWSIAMConnection ? NSControlStateValueOn : NSControlStateValueOff)];
+
     // Update the name for newly added favorites if not already touched by the user, by triggering a KVO update
     if (![[self name] length] || favoriteNameFieldWasAutogenerated) {
         NSString *favoriteName = [self _generateNameForConnection];
@@ -1677,6 +3079,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
             [self setName:favoriteName];
         }
     }
+
+    [self _syncAWSIAMAndSSLInterfaceState];
 }
 
 /**
@@ -1684,9 +3088,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)_reloadFavoritesViewData
 {
-    [favoritesOutlineView reloadData];
-    [favoritesOutlineView expandItem:[[favoritesRoot childNodes] objectAtIndex:0] expandChildren:NO];
-
+    [self.favoritesListDataSource reloadDataIn:favoritesOutlineView];
     [self _scrollToSelectedNode];
 }
 
@@ -1704,6 +3106,16 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         case SPTCPIPConnection:
             if (![[standardPasswordField stringValue] length]) {
                 [[dbDocument parentWindowControllerWindow] makeFirstResponder:standardPasswordField];
+            }
+            break;
+        case SPAWSIAMConnection:
+            if (awsIAMNameField) {
+                [[dbDocument parentWindowControllerWindow] makeFirstResponder:awsIAMNameField];
+            }
+            break;
+        case SPVaultConnection:
+            if (vaultNameField) {
+                [[dbDocument parentWindowControllerWindow] makeFirstResponder:vaultNameField];
             }
             break;
         case SPSocketConnection:
@@ -1726,6 +3138,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 {
     // Must be performed on the main thread
     if (![NSThread isMainThread]) return [[self onMainThread] _restoreConnectionInterface];
+
+    isConnecting = NO;
 
     // Reset the window title
     [dbDocument updateWindowTitle:self];
@@ -1859,7 +3273,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (NSNumber *)_createNewFavoriteID
 {
-    return [NSNumber numberWithInteger:[[NSString stringWithFormat:@"%f", [[NSDate date] timeIntervalSince1970]] hash]];
+    return [SAConnectionFormHelpers newFavoriteID];
 }
 
 /**
@@ -1889,9 +3303,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (NSString *)_stripInvalidCharactersFromString:(NSString *)subject
 {
-    NSString *result = [subject stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-
-    return [result stringByReplacingOccurrencesOfString:@"\n" withString:@""];
+    return [SAConnectionFormHelpers stripInvalidCharacters:subject ?: @""];
 }
 
 /**
@@ -1901,19 +3313,15 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (NSString *)_generateNameForConnection
 {
-    NSString *aName;
-
-    if ([self type] != SPSocketConnection && ![[self host] length]) {
-        return nil;
+    if ([self type] == SPVaultConnection) {
+        NSString *credPath = [[self vaultCredentialsPath] lastPathComponent];
+        NSString *vHost = [[self vaultHost] length] ? [self vaultHost] : @"vault";
+        return [credPath length] ? [NSString stringWithFormat:@"%@/%@", vHost, credPath] : vHost;
     }
 
-    aName = ([self type] == SPSocketConnection) ? @"localhost" : [self host];
-
-    if ([[self database] length]) {
-        aName = [NSString stringWithFormat:@"%@/%@", aName, [self database]];
-    }
-
-    return aName;
+    return [SAConnectionFormHelpers generateNameWithType:(SAConnectionType)[self type]
+                                                    host:[self host] ?: @""
+                                                database:[self database] ?: @""];
 }
 
 
@@ -1972,11 +3380,22 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         if (dbDocument == document) {
 
             cancellingConnection = YES;
+            connectionAttemptID++;
             dbDocument = nil;
 
             if (mySQLConnection) {
                 [mySQLConnection setDelegate:nil];
                 [NSThread detachNewThreadWithName:SPCtxt(@"SPConnectionController close background disconnect", dbDocument) target:mySQLConnection selector:@selector(disconnect) object:nil];
+            }
+
+            if ([self _isVaultConnection]) {
+                if ([vaultLoginIdentifier length]) {
+                    [VaultOIDCHandler cancelActiveLoginWithIdentifier:vaultLoginIdentifier];
+                }
+                [VaultAuthManager clearCachedCredentialsForHost:[self vaultHost] ?: @""
+                                                           port:[self vaultPort] ?: @""
+                                                      oidcMount:[self vaultOIDCMount] ?: @""
+                                                       credPath:[self vaultCredentialsPath] ?: @""];
             }
 
             if (sshTunnel) {
@@ -1985,340 +3404,6 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         }
     }
 }
-
-#pragma mark - SPConnectionHandler
-
-/**
- * Set up the MySQL connection, either through a successful tunnel or directly in the background.
- */
-- (void)initiateMySQLConnection
-{
-    if (isTestingConnection) {
-        if (sshTunnel) {
-            [progressIndicatorText setStringValue:NSLocalizedString(@"Testing MySQL...", @"MySQL connection test very short status message")];
-        }
-        else {
-            [progressIndicatorText setStringValue:NSLocalizedString(@"Testing connection...", @"Connection test very short status message")];
-        }
-    }
-    else if (sshTunnel) {
-        [progressIndicatorText setStringValue:NSLocalizedString(@"MySQL connecting...", @"MySQL connecting very short status message")];
-    }
-    else {
-        [progressIndicatorText setStringValue:NSLocalizedString(@"Connecting...", @"Generic connecting very short status message")];
-    }
-
-    [progressIndicatorText display];
-
-    [connectButton setTitle:NSLocalizedString(@"Cancel", @"cancel button")];
-    [connectButton setAction:@selector(cancelConnection:)];
-    [connectButton setEnabled:YES];
-    [connectButton display];
-
-    [NSThread detachNewThreadWithName:SPCtxt(@"SPConnectionController MySQL connection task", dbDocument)
-                               target:self
-                             selector:@selector(initiateMySQLConnectionInBackground)
-                               object:nil];
-}
-
-/**
- * Initiates the core of the MySQL connection process on a background thread.
- */
-- (void)initiateMySQLConnectionInBackground
-{
-    @autoreleasepool {
-        mySQLConnection = [[SPMySQLConnection alloc] init];
-
-        // Set up shared details
-        [mySQLConnection setUsername:[self user]];
-
-        // Initialise to socket if appropriate.
-        if ([self type] == SPSocketConnection) {
-            [mySQLConnection setUseSocket:YES];
-            [mySQLConnection setSocketPath:[self socket]];
-
-
-        }
-        // Initiate SSH tunnel to host if appropriate.
-        else if ([self type] == SPSSHTunnelConnection) {
-            [mySQLConnection setUseSocket:NO];
-
-            [mySQLConnection setHost:SPLocalhostAddress];
-            [mySQLConnection setPort:[sshTunnel localPort]];
-            [mySQLConnection setProxy:sshTunnel];
-        }
-        // Otherwise, connect directly to the host
-        else {
-            [mySQLConnection setUseSocket:NO];
-
-            if([[self host] length]) {
-                [mySQLConnection setHost:[self host]];
-            } else {
-                [mySQLConnection setHost:SPLocalhostAddress];
-            }
-
-            if ([[self port] length]) {
-                [mySQLConnection setPort:[[self port] integerValue]];
-            }
-
-
-        }
-
-        if ([self password] == nil) {
-            [self setPassword:@""];
-        }
-
-        // Only set the password if there is no Keychain item set or the connection is being tested or the password is different than in Keychain.
-        if ((isTestingConnection || !connectionKeychainItemName || (connectionKeychainItemName && ![[self password] isEqualToString:@"SequelAceSecretPassword"])) && [self password]) {
-            [mySQLConnection setPassword:[self password]];
-        }
-
-        if([self allowDataLocalInfile]) {
-            [mySQLConnection setAllowDataLocalInfile:YES];
-        }
-
-        // Enable Clear Text plugin when enabled
-        if ([self enableClearTextPlugin]) {
-            [mySQLConnection setEnableClearTextPlugin:YES];
-        }
-
-        // Enable SSL if set
-        if ([self useSSL]) {
-            [mySQLConnection setUseSSL:YES];
-
-            if ([self sslKeyFileLocationEnabled]) {
-                [mySQLConnection setSslKeyFilePath:[self sslKeyFileLocation]];
-            }
-
-            if ([self sslCertificateFileLocationEnabled]) {
-                [mySQLConnection setSslCertificatePath:[self sslCertificateFileLocation]];
-            }
-
-            if ([self sslCACertFileLocationEnabled]) {
-                [mySQLConnection setSslCACertificatePath:[self sslCACertFileLocation]];
-            }
-
-            NSString *userSSLCipherList = [prefs stringForKey:SPSSLCipherListKey];
-            if(userSSLCipherList) {
-                //strip out disabled ciphers (e.g. in "foo:bar:--:baz")
-                NSRange markerPos = [userSSLCipherList rangeOfRegex:@":?--"];
-                if(markerPos.location != NSNotFound) {
-                    userSSLCipherList = [userSSLCipherList substringToIndex:markerPos.location];
-                }
-                [mySQLConnection setSslCipherList:userSSLCipherList];
-            }
-        }
-
-        if(![self useCompression]) [mySQLConnection removeClientFlags:SPMySQLClientFlagCompression];
-
-        // Connection delegate must be set before actual connection attempt is made
-        [mySQLConnection setDelegate:dbDocument];
-
-        // Set whether or not we should enable delegate logging according to the prefs
-        [mySQLConnection setDelegateQueryLogging:[prefs boolForKey:SPConsoleEnableLogging]];
-
-        // Set options from preferences
-        [mySQLConnection setTimeout:[[prefs objectForKey:SPConnectionTimeoutValue] integerValue]];
-        [mySQLConnection setUseKeepAlive:[[prefs objectForKey:SPUseKeepAlive] boolValue]];
-        [mySQLConnection setKeepAliveInterval:[[prefs objectForKey:SPKeepAliveInterval] floatValue]];
-
-        // Connect
-        SPLog(@"Establish connection");
-        [mySQLConnection connect];
-        if (![mySQLConnection isConnected]) {
-            if (sshTunnel && !cancellingConnection) {
-                // This is a race condition we cannot fix "properly":
-                // For meaningful error handling we need to also consider the debug output from the SSH connection.
-                // The SSH debug output might be sligthly delayed though (flush, delegates, ...) or
-                // there might not even by any output at all (when it is purely a libmysql issue).
-                // TL;DR: No guaranteed events we could wait for, just trying our luck.
-                [NSThread sleepForTimeInterval:0.1]; // 100ms
-
-                // If the state is connection refused, attempt the MySQL connection again with the host using the hostfield value.
-                if ([sshTunnel state] == SPMySQLProxyForwardingFailed) {
-                    if ([sshTunnel localPortFallback]) {
-                        [mySQLConnection setPort:[sshTunnel localPortFallback]];
-                        [mySQLConnection connect];
-
-                        if (![mySQLConnection isConnected]) {
-                            [NSThread sleepForTimeInterval:0.1]; //100ms
-                        }
-                    }
-                }
-            }
-
-            if (![mySQLConnection isConnected]) {
-                if (!cancellingConnection) {
-                    NSString *errorMessage;
-                    if (sshTunnel && [sshTunnel state] == SPMySQLProxyForwardingFailed) {
-                        errorMessage = [NSString stringWithFormat:NSLocalizedString(@"Unable to connect to host %@ because the port connection via SSH was refused.\n\nPlease ensure that your MySQL host is set up to allow TCP/IP connections (no --skip-networking) and is configured to allow connections from the host you are tunnelling via.\n\nYou may also want to check the port is correct and that you have the necessary privileges.\n\nChecking the error detail will show the SSH debug log which may provide more details.\n\nMySQL said: %@", @"message of panel when SSH port forwarding failed"), [self host], [mySQLConnection lastErrorMessage]];
-                        [[self onMainThread] failConnectionWithTitle:NSLocalizedString(@"SSH port forwarding failed", @"title when ssh tunnel port forwarding failed") errorMessage:errorMessage detail:[sshTunnel debugMessages]];
-                    }
-                    else if ([mySQLConnection lastErrorID] == 1045) { // "Access denied" error
-                        errorMessage = [NSString stringWithFormat:NSLocalizedString(@"Unable to connect to host %@ because access was denied.\n\nDouble-check your username and password and ensure that access from your current location is permitted.\n\nMySQL said: %@", @"message of panel when connection to host failed due to access denied error"), [self host], [mySQLConnection lastErrorMessage]];
-                        [[self onMainThread] failConnectionWithTitle:NSLocalizedString(@"Access denied!", @"connection failed due to access denied title") errorMessage:errorMessage detail:nil];
-                    }
-                    else if ([self type] == SPSocketConnection && (![self socket] || ![[self socket] length]) && ![mySQLConnection socketPath]) {
-                        errorMessage = [NSString stringWithFormat:NSLocalizedString(@"The socket file could not be found in any common location. Please supply the correct socket location.\n\nMySQL said: %@", @"message of panel when connection to socket failed because optional socket could not be found"), [mySQLConnection lastErrorMessage]];
-                        [[self onMainThread] failConnectionWithTitle:NSLocalizedString(@"Socket not found!", @"socket not found title") errorMessage:errorMessage detail:nil];
-                    }
-                    else if ([self type] == SPSocketConnection) {
-                        errorMessage = [NSString stringWithFormat:NSLocalizedString(@"Unable to connect via the socket, or the request timed out.\n\nDouble-check that the socket path is correct and that you have the necessary privileges, and that the server is running.\n\nMySQL said: %@", @"message of panel when connection to host failed"), [mySQLConnection lastErrorMessage]];
-                        [[self onMainThread] failConnectionWithTitle:NSLocalizedString(@"Socket connection failed!", @"socket connection failed title") errorMessage:errorMessage detail:nil];
-                    }
-                    else {
-                        errorMessage = [NSString stringWithFormat:NSLocalizedString(@"Unable to connect to host %@, or the request timed out.\n\nBe sure that the address is correct and that you have the necessary privileges, or try increasing the connection timeout (currently %ld seconds).\n\nMySQL said: %@", @"message of panel when connection to host failed"), [self host], (long)[[prefs objectForKey:SPConnectionTimeoutValue] integerValue], [mySQLConnection lastErrorMessage]];
-                        [[self onMainThread] failConnectionWithTitle:NSLocalizedString(@"Connection failed!", @"connection failed title") errorMessage:errorMessage detail:nil];
-                    }
-                }
-
-                // Tidy up
-                isConnecting = NO;
-
-                if (sshTunnel) {
-                    [sshTunnel disconnect];
-                }
-
-
-                if (!cancellingConnection) [self _restoreConnectionInterface];
-
-                return;
-            }
-        }
-
-        if ([self database] && ![[self database] isEqualToString:@""]) {
-            if (![mySQLConnection selectDatabase:[self database]]) {
-                if (!isTestingConnection) {
-                    [[self onMainThread] failConnectionWithTitle:NSLocalizedString(@"Could not select database", @"message when database selection failed") errorMessage:[NSString stringWithFormat:NSLocalizedString(@"Connected to host, but unable to connect to database %@.\n\nBe sure that the database exists and that you have the necessary privileges.\n\nMySQL said: %@", @"message of panel when connection to db failed"), [self database], [mySQLConnection lastErrorMessage]] detail:nil];
-                }
-
-                // Tidy up
-                isConnecting = NO;
-
-
-                [self _restoreConnectionInterface];
-                if (isTestingConnection) {
-                    [self _showConnectionTestResult:NSLocalizedString(@"Invalid database", @"Invalid database very short status message")];
-                }
-
-                return;
-            }
-        }
-
-        switch (timeZoneMode) {
-            case SPConnectionTimeZoneModeUseSystemTZ:
-                [mySQLConnection updateTimeZoneIdentifier:NSTimeZone.systemTimeZone.name];
-                break;
-            case SPConnectionTimeZoneModeUseFixedTZ:
-                [mySQLConnection updateTimeZoneIdentifier:timeZoneIdentifier];
-                break;
-            default:
-                break;
-        }
-
-        // Connection established
-        SPLog(@"Establisted connection");
-        [self performSelectorOnMainThread:@selector(mySQLConnectionEstablished) withObject:nil waitUntilDone:NO];
-    }
-}
-
-/**
- * Initiate the SSH connection process.
- * This should only be called as part of initiateConnection:, and will indirectly
- * call initiateMySQLConnection if it's successful.
- */
-- (void)initiateSSHTunnelConnection
-{
-    if (isTestingConnection) {
-        [progressIndicatorText setStringValue:NSLocalizedString(@"Testing SSH...", @"SSH testing very short status message")];
-    } else {
-        [progressIndicatorText setStringValue:NSLocalizedString(@"SSH connecting...", @"SSH connecting very short status message")];
-    }
-    [progressIndicatorText display];
-
-    [connectButton setTitle:NSLocalizedString(@"Cancel", @"cancel button")];
-    [connectButton setAction:@selector(cancelConnection:)];
-    [connectButton setEnabled:YES];
-    [connectButton display];
-
-    // Trim whitespace and newlines from the SSH host field before attempting to connect
-    [self setSshHost:[[self sshHost] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]];
-
-    // Confirm that the SSH config file is accessible
-    NSString *sshConfigFile = [[NSUserDefaults standardUserDefaults] stringForKey:SPSSHConfigFile];
-    if (sshConfigFile == nil) {
-        sshConfigFile = [[NSBundle mainBundle] pathForResource:SPSSHConfigFile ofType:@""];
-    }
-
-    if (![SPFileHandle fileHandleForReadingAtPath:sshConfigFile]) {
-        SPLog(@"Cannot read sshConfigFile: %@", sshConfigFile);
-
-        NSAlert *alert = [[NSAlert alloc] init];
-        [alert addButtonWithTitle:NSLocalizedString(@"Go to Network Settings", @"SSH config file error alert - Go to network settings button")];
-        [alert addButtonWithTitle:NSLocalizedString(@"Reset to Default & Continue", @"SSH config file error alert - Reset to default button")];
-        [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"SSH config file error alert - Cancel button")];
-        [alert setMessageText:NSLocalizedString(@"Cannot Access SSH Config File", @"SSH config file error alert title")];
-        [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Sequel Ace does not have permission to read the configured SSH config file at '%@'.\n\nThis might be due to Sandbox restrictions. You can configure a different SSH Config File in the Network tab of Preferences or correct access to the exiting file in the Files tab of Preferences, or you can reset the path to the Sequel Ace default.", @"SSH config file error alert message"), sshConfigFile]];
-        [alert setAlertStyle:NSAlertStyleWarning];
-
-        NSInteger response = [alert runModal];
-
-        if (response == NSAlertFirstButtonReturn) { // Go to Settings
-            SPPreferenceController *prefCon = [((SPAppController *)[NSApp delegate]) preferenceController];
-            [prefCon showWindow:nil];
-
-            id filePaneItem = prefCon->networkItem;
-            [prefCon displayPreferencePane:filePaneItem];
-
-            // After showing settings, restore UI and stop connection attempt
-            [self _restoreConnectionInterface];
-            return;
-
-        } else if (response == NSAlertSecondButtonReturn) { // Reset to Default
-            NSString *defaultSSHConfigPath = [[NSBundle mainBundle] pathForResource:SPSSHConfigFile ofType:@""];
-            [[NSUserDefaults standardUserDefaults] setObject:defaultSSHConfigPath forKey:SPSSHConfigFile];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-
-            //Continue with connection attempt - it will now use the new config
-        } else { // Cancel or closed alert
-            // Restore UI and stop connection attempt
-            [self _restoreConnectionInterface];
-            return;
-        }
-    }
-
-    // Set up the tunnel details
-    sshTunnel = [[SPSSHTunnel alloc] initToHost:[self sshHost] port:[[self sshPort] integerValue] login:[self sshUser] tunnellingToPort:([[self port] length]?[[self port] integerValue]:3306) onHost:[self host]];
-
-    if(sshTunnel == nil) {
-        [[self onMainThread] failConnectionWithTitle:NSLocalizedString(@"SSH connection failed!", @"SSH connection failed title")
-                                        errorMessage:@"Failed to Initialize SSH Handle"
-                                              detail:@"Could not initiate SSH connection worker."];
-        return;
-    }
-
-    [sshTunnel setParentWindow:[dbDocument parentWindowControllerWindow]];
-
-    // Only set the password if there is no Keychain item set or the connection is being tested or the password is different than in Keychain.
-    if ((isTestingConnection || !connectionSSHKeychainItemName || (connectionSSHKeychainItemName && ![[self sshPassword] isEqualToString:@"SequelAceSecretPassword"])) && [self sshPassword]) {
-        [sshTunnel setPassword:[self sshPassword]];
-    } else if (connectionSSHKeychainItemName) {
-        [sshTunnel setPasswordKeychainName:connectionSSHKeychainItemName account:connectionSSHKeychainItemAccount]; // FIXME: not error checked?
-    }
-
-    // Set the public key path if appropriate
-    if (sshKeyLocationEnabled && sshKeyLocation) {
-        [sshTunnel setKeyFilePath:sshKeyLocation];
-    }
-
-    // Set the callback function on the tunnel
-    [sshTunnel setConnectionStateChangeSelector:@selector(sshTunnelCallback:) delegate:self];
-
-    // Ask the tunnel to connect.  This will call the callback below on success or failure, passing
-    // itself as an argument - retain count should be one at this point.
-    [sshTunnel connect];
-}
-
 /**
  * Called on the main thread once the MySQL connection is established on the background thread. Either the
  * connection was cancelled or it was successful.
@@ -2327,6 +3412,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 {
     SPLog(@"mySQLConnectionEstablished");
     isConnecting = NO;
+    self.localNetworkPermissionDeniedForCurrentAttempt = NO;
 
     // If the user is only testing the connection, kill the connection
     // once established and reset the UI.  Also catch connection cancels.
@@ -2354,8 +3440,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [progressIndicator stopAnimation:self];
     [progressIndicatorText setHidden:YES];
 
-    // If SSL was enabled, check it was established correctly
-    if (useSSL && ([self type] == SPTCPIPConnection || [self type] == SPSocketConnection)) {
+    // If SSL was enabled (manually or implicitly via IAM), check it was established correctly
+    BOOL requiresSSL = (useSSL || [self _isAWSIAMConnection]);
+    if (requiresSSL && ([self type] == SPTCPIPConnection || [self type] == SPSocketConnection || [self type] == SPAWSIAMConnection || [self type] == SPVaultConnection)) {
         if (![mySQLConnection isConnectedViaSSL]) {
             [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"SSL connection not established", @"SSL requested but not used title") message:NSLocalizedString(@"You requested that the connection should be established using SSL, but MySQL made the connection without SSL.\n\nThis may be because the server does not support SSL connections, or has SSL disabled; or insufficient details were supplied to establish an SSL connection.\n\nThis connection is not encrypted.", @"SSL connection requested but not established error detail") callback:nil];
         }
@@ -2369,41 +3456,6 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [self addConnectionToDocument];
 }
 
-/**
- * A callback function for the SSH Tunnel setup process - will be called on a connection
- * state change, allowing connection to fail or proceed as appropriate.  If successful,
- * will call initiateMySQLConnection.
- */
-- (void)sshTunnelCallback:(SPSSHTunnel *)theTunnel {
-    if (cancellingConnection){
-        SPLog(@"cancellingConnection, returning");
-        return;
-    }
-
-    NSInteger newState = [theTunnel state];
-
-    SPLog(@"newState = %li", (long)newState);
-
-    // If the user cancelled the password prompt dialog, continue with no further action.
-    if ([theTunnel passwordPromptCancelled]) {
-        SPLog(@"user cancelled the password prompt dialog, continue with no further action");
-        [self _restoreConnectionInterface];
-
-        return;
-    }
-
-    if (newState == SPMySQLProxyIdle) {
-        SPLog(@"SPMySQLProxyIdle, failing");
-
-        [[self onMainThread] failConnectionWithTitle:NSLocalizedString(@"SSH connection failed!", @"SSH connection failed title")
-                                        errorMessage:[theTunnel lastError]
-                                              detail:[sshTunnel debugMessages]];
-    } else if (newState == SPMySQLProxyConnected) {
-        SPLog(@"SPMySQLProxyConnected, calling initiateMySQLConnection");
-
-        [self initiateMySQLConnection];
-    }
-}
 
 /**
  * Add the connection to the parent document and restore the
@@ -2412,18 +3464,174 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 - (void)addConnectionToDocument
 {
     SPLog(@"addConnectionToDocument");
-    // Hide the connection view and restore the main view
-    [connectionView removeFromSuperviewWithoutNeedingDisplay];
-    [databaseConnectionView setHidden:NO];
+    // Restore the database content view via coordinator
+    [self.viewCoordinator restoreDatabaseViewRemovingConnectionView:connectionView];
 
     // Restore the toolbar icons
     NSArray *toolbarItems = [[[dbDocument parentWindowControllerWindow] toolbar] items];
 
     for (NSUInteger i = 0; i < [toolbarItems count]; i++) [[toolbarItems objectAtIndex:i] setEnabled:YES];
 
-    // Pass the connection to the table document, allowing it to set
-    // up the other classes and the rest of the interface.
-    [dbDocument setConnection:mySQLConnection];
+    // Notify the connection delegate if set; otherwise fall back to the legacy
+    // direct document call. This allows a standalone connection window to receive
+    // the connection without being a document.
+    if (self.connectionDelegate) {
+        [self.connectionDelegate connectionDidEstablish:mySQLConnection info:[self _buildConnectionInfo]];
+    } else {
+        // Legacy path: pass the connection directly to the document.
+        [dbDocument setConnection:mySQLConnection];
+    }
+}
+
+/**
+ * Builds an SAConnectionInfoObjC from the current controller state.
+ * Used by the connection service and addConnectionToDocument.
+ */
+- (SAConnectionInfoObjC *)_buildConnectionInfo
+{
+    SAConnectionInfoObjC *info = [[SAConnectionInfoObjC alloc] init];
+    info.type = (SAConnectionType)self.type;
+    info.name = self.name ?: @"";
+    info.host = self.host ?: @"";
+    info.user = self.user ?: @"";
+    info.password = self.password ?: @"";
+    info.database = self.database ?: @"";
+    info.socket = self.socket ?: @"";
+    info.port = self.port ?: @"";
+    info.colorIndex = self.colorIndex;
+    info.useCompression = self.useCompression;
+    info.useSSL = self.useSSL;
+    info.sslKeyFileLocationEnabled = self.sslKeyFileLocationEnabled;
+    info.sslKeyFileLocation = self.sslKeyFileLocation ?: @"";
+    info.sslCertificateFileLocationEnabled = self.sslCertificateFileLocationEnabled;
+    info.sslCertificateFileLocation = self.sslCertificateFileLocation ?: @"";
+    info.sslCACertFileLocationEnabled = self.sslCACertFileLocationEnabled;
+    info.sslCACertFileLocation = self.sslCACertFileLocation ?: @"";
+    info.sshHost = self.sshHost ?: @"";
+    info.sshUser = self.sshUser ?: @"";
+    info.sshPassword = self.sshPassword ?: @"";
+    info.sshKeyLocationEnabled = self.sshKeyLocationEnabled;
+    info.sshKeyLocation = self.sshKeyLocation ?: @"";
+    info.sshPort = self.sshPort ?: @"";
+    info.sshRemoteSocketPath = self.sshRemoteSocketPath ?: @"";
+    info.connectionKeychainID = connectionKeychainID ?: @"";
+    info.connectionKeychainItemName = connectionKeychainItemName ?: @"";
+    info.connectionKeychainItemAccount = connectionKeychainItemAccount ?: @"";
+    info.connectionSSHKeychainItemName = connectionSSHKeychainItemName ?: @"";
+    info.connectionSSHKeychainItemAccount = connectionSSHKeychainItemAccount ?: @"";
+    info.timeZoneMode = (SAConnectionTimeZoneMode)timeZoneMode;
+    info.timeZoneIdentifier = timeZoneIdentifier ?: @"";
+    info.allowDataLocalInfile = self.allowDataLocalInfile;
+    info.enableClearTextPlugin = self.enableClearTextPlugin;
+    info.useAWSIAMAuth = self.useAWSIAMAuth;
+    info.awsRegion = self.awsRegion ?: @"";
+    info.awsProfile = self.awsProfile ?: @"";
+    info.vaultHost = self.vaultHost ?: @"";
+    info.vaultPort = self.vaultPort ?: @"";
+    info.vaultOIDCMount = self.vaultOIDCMount ?: @"";
+    info.vaultCredentialsPath = self.vaultCredentialsPath ?: @"";
+    return info;
+}
+
+/**
+ * Resolves the MySQL password for use with SAConnectionService.
+ * Handles: AWS IAM token generation, keychain marker detection, plaintext.
+ * Returns nil and calls failConnectionWithTitle: on AWS IAM error.
+ */
+- (NSString *)_resolvedMySQLPassword
+{
+    // AWS IAM: generate auth token
+    if ([self _isAWSIAMConnection]) {
+        NSError *awsError = nil;
+        NSString *token = [self generateAWSIAMAuthTokenWithError:&awsError];
+        if (awsError || ![token length]) {
+            [self failConnectionWithTitle:NSLocalizedString(@"AWS IAM Authentication Failed", @"AWS IAM auth failed title")
+                             errorMessage:awsError ? awsError.localizedDescription : NSLocalizedString(@"Empty authentication token returned", @"AWS IAM empty token error")
+                                   detail:nil];
+            return nil;
+        }
+        return token;
+    }
+
+    // Keychain marker: if password matches the marker, fetch from keychain
+    if (connectionKeychainItemName && [[self password] isEqualToString:@"SequelAceSecretPassword"]) {
+        NSString *keychainPassword = [keychain getPasswordForName:connectionKeychainItemName account:connectionKeychainItemAccount];
+        return keychainPassword ?: @"";
+    }
+
+    return [self password] ?: @"";
+}
+
+/**
+ * Resolves the SSH password for use with SAConnectionService.
+ * If keychain item is set and password is the marker, returns empty string
+ * (the service passes keychain names through to the tunnel).
+ */
+- (NSString *)_resolvedSSHPassword
+{
+    if (connectionSSHKeychainItemName && [[self sshPassword] isEqualToString:@"SequelAceSecretPassword"]) {
+        return @""; // Tunnel will use keychain names from SAConnectionInfoObjC
+    }
+    return [self sshPassword] ?: @"";
+}
+
+/**
+ * Validates the SSH config file is accessible. Shows alert if not.
+ * Returns YES if connection should proceed, NO to abort.
+ */
+- (BOOL)_validateSSHConfigFile
+{
+    NSString *sshConfigFile = [[NSUserDefaults standardUserDefaults] stringForKey:SPSSHConfigFile];
+    if (sshConfigFile == nil) {
+        sshConfigFile = [[NSBundle mainBundle] pathForResource:SPSSHConfigFile ofType:@""];
+    }
+
+    if ([SPFileHandle fileHandleForReadingAtPath:sshConfigFile]) {
+        return YES; // Config file is accessible
+    }
+
+    SPLog(@"Cannot read sshConfigFile: %@", sshConfigFile);
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert addButtonWithTitle:NSLocalizedString(@"Go to Network Settings", @"SSH config file error alert - Go to network settings button")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Reset to Default & Continue", @"SSH config file error alert - Reset to default button")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"SSH config file error alert - Cancel button")];
+    [alert setMessageText:NSLocalizedString(@"Cannot Access SSH Config File", @"SSH config file error alert title")];
+    [alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Sequel Ace does not have permission to read the configured SSH config file at '%@'.\n\nThis might be due to Sandbox restrictions. You can configure a different SSH Config File in the Network tab of Preferences or correct access to the exiting file in the Files tab of Preferences, or you can reset the path to the Sequel Ace default.", @"SSH config file error alert message"), sshConfigFile]];
+    [alert setAlertStyle:NSAlertStyleWarning];
+
+    NSInteger response = [alert runModal];
+
+    if (response == NSAlertFirstButtonReturn) { // Go to Settings
+        SPPreferenceController *prefCon = [((SPAppController *)[NSApp delegate]) preferenceController];
+        [prefCon showWindow:nil];
+        id filePaneItem = prefCon->networkItem;
+        [prefCon displayPreferencePane:filePaneItem];
+        [self _restoreConnectionInterface];
+        return NO;
+    } else if (response == NSAlertSecondButtonReturn) { // Reset to Default
+        NSString *defaultSSHConfigPath = [[NSBundle mainBundle] pathForResource:SPSSHConfigFile ofType:@""];
+        [[NSUserDefaults standardUserDefaults] setObject:defaultSSHConfigPath forKey:SPSSHConfigFile];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        return YES; // Continue with default config
+    } else { // Cancel
+        [self _restoreConnectionInterface];
+        return NO;
+    }
+}
+
+- (void)_failConnectionWithTitle:(NSString *)theTitle errorMessage:(NSString *)theErrorMessage detail:(NSString *)errorDetail localNetworkPermissionDenied:(BOOL)localNetworkPermissionDenied
+{
+    void (^presentFailure)(void) = ^{
+        self.localNetworkPermissionDeniedForCurrentAttempt = localNetworkPermissionDenied;
+        [self failConnectionWithTitle:theTitle errorMessage:theErrorMessage detail:errorDetail];
+    };
+
+    if ([NSThread isMainThread]) {
+        presentFailure();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), presentFailure);
+    }
 }
 
 /**
@@ -2459,14 +3667,36 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         [[(id)delegate onMainThread] connectionControllerConnectAttemptFailed:self];
     }
 
+    // Notify the new-style connection delegate about the failure
+    if (self.connectionDelegate) {
+        [self.connectionDelegate connectionDidFailWithError:theTitle ?: @"Connection failed"
+                                                     detail:errorDetail];
+    }
+
     NSString *errorMessage = errorDetail ? : @"";
     if (theErrorMessage) {
         errorMessage = [errorMessage stringByAppendingString:@"\n"];
         errorMessage = [errorMessage stringByAppendingString:theErrorMessage];
     }
 
+    BOOL shouldShowLocalNetworkPermissionAlert = self.localNetworkPermissionDeniedForCurrentAttempt || [self _shouldShowLocalNetworkPermissionAlertForErrorMessage:theErrorMessage detail:errorDetail];
+    self.localNetworkPermissionDeniedForCurrentAttempt = NO;
+
     // Only display the connection error message if there is a window visible
     if ([[dbDocument parentWindowControllerWindow] isVisible]) {
+        if (shouldShowLocalNetworkPermissionAlert) {
+            errorShowing = YES;
+            [self _showLocalNetworkPermissionAlert];
+            errorShowing = NO;
+
+            // we're not connecting anymore, it failed.
+            isConnecting = NO;
+            // update tab and window title
+            [dbDocument updateWindowTitle:self];
+
+            return;
+        }
+
         NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0,0,488,140)];
         [scrollView setDrawsBackground:NO];
         [scrollView setHasVerticalScroller:YES];
@@ -2519,6 +3749,113 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     }
 }
 
+- (BOOL)_shouldShowLocalNetworkPermissionAlertForErrorMessage:(NSString *)errorMessage detail:(NSString *)errorDetail
+{
+    if ([self type] != SPSSHTunnelConnection) return NO;
+
+    // Local Network privacy restrictions for sandboxed macOS apps started with macOS 15 (Sequoia).
+    if (@available(macOS 15.0, *)) {
+        return SPSSHNoRouteToHostLikelyLocalNetworkPrivacyIssue(errorMessage, errorDetail, [self sshHost]);
+    }
+
+    return NO;
+}
+
+- (BOOL)_isLocalNetworkAccessDeniedForCurrentConnectionAttempt
+{
+    if (@available(macOS 15.0, *)) {
+        BOOL shouldProbeForLocalNetworkDenial = NO;
+
+        if ([self type] == SPSSHTunnelConnection && sshTunnel) {
+            if ([sshTunnel state] == SPMySQLProxyIdle) {
+                // SSH setup failed before MySQL had a chance to emit a network error.
+                shouldProbeForLocalNetworkDenial = YES;
+            } else if ([sshTunnel state] == SPMySQLProxyConnected) {
+                // SSH is already connected; probing the SSH host cannot indicate local-network denial.
+                return NO;
+            }
+        } else {
+            NSUInteger lastErrorID = [mySQLConnection lastErrorID];
+            if (lastErrorID == 1045) return NO; // Access denied credentials error.
+
+            NSString *lastErrorMessage = [[mySQLConnection lastErrorMessage] lowercaseString] ?: @"";
+            BOOL looksLikeNetworkFailure = ([lastErrorMessage rangeOfString:@"can't connect"].location != NSNotFound
+                                            || [lastErrorMessage rangeOfString:@"timed out"].location != NSNotFound
+                                            || [lastErrorMessage rangeOfString:@"no route to host"].location != NSNotFound
+                                            || [lastErrorMessage rangeOfString:@"network is unreachable"].location != NSNotFound);
+
+            shouldProbeForLocalNetworkDenial = (looksLikeNetworkFailure || lastErrorID == 2002 || lastErrorID == 2003);
+        }
+
+        if (!shouldProbeForLocalNetworkDenial) return NO;
+
+        NSString *probeHost = nil;
+        NSInteger probePort = 0;
+
+        if ([self type] == SPTCPIPConnection) {
+            probeHost = [self host];
+            probePort = ([[self port] length] ? [[self port] integerValue] : 3306);
+        } else if ([self type] == SPSSHTunnelConnection) {
+            probeHost = [self sshHost];
+            probePort = ([[self sshPort] length] ? [[self sshPort] integerValue] : 22);
+        } else {
+            return NO;
+        }
+
+        probeHost = [probeHost stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (![probeHost length]) return NO;
+        if (probePort <= 0) return NO;
+        if ([[probeHost lowercaseString] isEqualToString:@"localhost"] || [probeHost isEqualToString:@"127.0.0.1"] || [probeHost isEqualToString:@"::1"]) return NO;
+
+        return [SALocalNetworkPermissionChecker isLocalNetworkAccessDeniedForHost:probeHost port:probePort timeout:0.75];
+    }
+
+    return NO;
+}
+
+- (void)_showLocalNetworkPermissionAlert
+{
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:NSLocalizedString(@"Local Network Access is Required", @"title for local network privacy alert")];
+    NSString *informativeText = nil;
+    if ([self type] == SPSSHTunnelConnection) {
+        informativeText = NSLocalizedString(@"Sequel Ace could not reach the SSH host on your local network. On macOS 15 (Sequoia) and later, this often means Local Network access is disabled for Sequel Ace.\n\nOpen System Settings > Privacy & Security > Local Network and enable Sequel Ace, then try connecting again.", @"informative text for local network privacy alert (ssh)");
+    } else {
+        informativeText = NSLocalizedString(@"Sequel Ace could not reach the database host on your local network. On macOS 15 (Sequoia) and later, this often means Local Network access is disabled for Sequel Ace.\n\nOpen System Settings > Privacy & Security > Local Network and enable Sequel Ace, then try connecting again.", @"informative text for local network privacy alert (direct)");
+    }
+    [alert setInformativeText:informativeText];
+    [alert addButtonWithTitle:NSLocalizedString(@"Open Local Network Settings", @"button title to open local network privacy settings")];
+    [alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+
+    NSModalResponse alertResponse = [alert runModal];
+    if (alertResponse != NSAlertFirstButtonReturn) return;
+
+    if ([self _openLocalNetworkPrivacySettings]) return;
+
+    [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Unable to Open System Settings", @"title when local network privacy settings deep link fails")
+                                 message:NSLocalizedString(@"Couldn't open the Local Network privacy settings automatically.\n\nIn macOS, open System Settings > Privacy & Security > Local Network and enable Sequel Ace.", @"message shown when local network privacy settings deep link fails")
+                                callback:nil];
+}
+
+- (BOOL)_openLocalNetworkPrivacySettings
+{
+    NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
+
+    NSArray<NSString *> *settingsURLs = @[
+        @"x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_LocalNetwork",
+        @"x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork",
+        @"x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension",
+        @"x-apple.systempreferences:com.apple.preference.security"
+    ];
+
+    for (NSString *settingsURL in settingsURLs) {
+        NSURL *url = [NSURL URLWithString:settingsURL];
+        if (url && [workspace openURL:url]) return YES;
+    }
+
+    return NO;
+}
+
 #pragma mark - SPConnectionHandlerPrivateAPI
 
 /**
@@ -2546,34 +3883,19 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 }
 
 #pragma mark -
-#pragma mark Outline view delegate methods
+#pragma mark SAFavoritesListDelegate
 
-- (BOOL)outlineView:(NSOutlineView *)outlineView isGroupItem:(id)item
-{
-    return ([[(SPTreeNode *)item parentNode] parentNode] == nil);
-}
-
-- (void)outlineViewSelectionIsChanging:(NSNotification *)notification
+- (void)favoritesListSelectionDidChange:(SPTreeNode *)selectedNode
 {
     if (isEditingConnection) {
         [self _stopEditingConnection];
-
-        [[notification object] setNeedsDisplay:YES];
+        [favoritesOutlineView setNeedsDisplay:YES];
     }
-}
 
-- (void)outlineViewSelectionDidChange:(NSNotification *)notification
-{
     NSInteger selected = [favoritesOutlineView numberOfSelectedRows];
-
-    if (isEditingConnection) {
-        [self _stopEditingConnection];
-        [[notification object] setNeedsDisplay:YES];
-    }
 
     if (selected == 1) {
         [self updateFavoriteSelection:self];
-
         favoriteNameFieldWasAutogenerated = NO;
         [connectionResizeContainer setHidden:NO];
         [connectionInstructionsTextField setStringValue:NSLocalizedString(@"Enter connection details below, or choose a favorite", @"enter connection details label")];
@@ -2584,295 +3906,58 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     }
 }
 
-- (NSCell *)outlineView:(NSOutlineView *)outlineView dataCellForTableColumn:(NSTableColumn *)tableColumn item:(id)item
+- (void)favoritesListNodeDoubleClicked:(SPTreeNode *)node
 {
-    if (item == quickConnectItem) {
-        return (NSCell *)quickConnectCell;
-    }
-
-    return [tableColumn dataCellForRow:[outlineView rowForItem:item]];
+    [self nodeDoubleClicked:self];
 }
 
-- (void)outlineView:(NSOutlineView *)outlineView willDisplayCell:(id)cell forTableColumn:(NSTableColumn *)tableColumn item:(id)item
+- (void)favoritesListDidRenameNode:(SPTreeNode *)node to:(NSString *)newName
 {
-    SPTreeNode *node = (SPTreeNode *)item;
-    SPFavoriteTextFieldCell *favoriteCell = (SPFavoriteTextFieldCell *)cell;
-
-    // Set an image as appropriate; the quick connect image for that entry, no image for other
-    // top-level items, the folder image for group nodes, or the database image for other nodes.
-    if (![[node parentNode] parentNode]) {
-        if (node == quickConnectItem) {
-            if ([outlineView rowForItem:item] == [outlineView selectedRow]) {
-                [favoriteCell setImage:[NSImage imageNamed:SPQuickConnectImageWhite]];
-            }
-            else {
-                [favoriteCell setImage:[NSImage imageNamed:SPQuickConnectImage]];
-            }
-        }
-        else {
-            [favoriteCell setImage:nil];
-        }
-        [favoriteCell setLabelColor:nil];
+    if (![node isGroup]) {
+        // Note: this saves the full form state, matching the original outlineView:setObjectValue:
+        // behavior. A future improvement could save only the name field.
+        [self setName:newName];
+        [self _saveCurrentDetailsCreatingNewFavorite:NO validateDetails:NO];
     }
     else {
-        if ([node isGroup]) {
-            [favoriteCell setImage:folderImage];
-            [favoriteCell setLabelColor:nil];
-        }
-        else {
-            [favoriteCell setImage:[NSImage imageNamed:SPDatabaseImage]];
-            NSColor *bgColor = nil;
-            NSNumber *colorIndexObj = [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteColorIndexKey];
-            if(colorIndexObj != nil) {
-                bgColor = [[SPFavoriteColorSupport sharedInstance] colorForIndex:[colorIndexObj integerValue]];
-            }
-            [favoriteCell setLabelColor:bgColor];
-        }
-    }
-}
-
-- (CGFloat)outlineView:(NSOutlineView *)outlineView heightOfRowByItem:(id)item
-{
-    NSFont *tableFont = [NSUserDefaults getFont];
-    CGFloat textHeight = NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height;
-    return MAX(24.0f, textHeight + 8.0f); // Ensure minimum height of 24 with padding for larger fonts
-}
-
-- (NSString *)outlineView:(NSOutlineView *)outlineView toolTipForCell:(NSCell *)cell rect:(NSRectPointer)rect tableColumn:(NSTableColumn *)tableColumn item:(id)item mouseLocation:(NSPoint)mouseLocation
-{
-    NSString *toolTip = nil;
-
-    SPTreeNode *node = (SPTreeNode *)item;
-
-    if (![node isGroup]) {
-
-        NSString *favoriteName = [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteNameKey];
-        NSString *favoriteHostname = [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteHostKey];
-
-        toolTip = ([favoriteHostname length]) ? [NSString stringWithFormat:@"%@ (%@)", favoriteName, favoriteHostname] : favoriteName;
-    }
-
-    // Only display a tooltip for group nodes that are a descendant of the root node
-    else if ([[node parentNode] parentNode]) {
-
-        NSUInteger favCount = 0;
-        NSUInteger groupCount = 0;
-
-        for (SPTreeNode *eachNode in [node childNodes])
-        {
-            if ([eachNode isGroup]) {
-                groupCount++;
-            }
-            else {
-                favCount++;
-            }
-        }
-
-        NSMutableArray *tooltipParts = [NSMutableArray arrayWithCapacity:2];
-
-        if (favCount || !groupCount) {
-            [tooltipParts addObject:[NSString stringWithFormat:((favCount == 1) ? NSLocalizedString(@"%lu favorite", @"favorite singular label (%d == 1)") : NSLocalizedString(@"%lu favorites", @"favorites plural label (%d != 1)")), (unsigned long)favCount]];
-        }
-
-        if (groupCount) {
-            [tooltipParts addObject:[NSString stringWithFormat:((groupCount == 1) ? NSLocalizedString(@"%lu group", @"favorite group singular label (%d == 1)") : NSLocalizedString(@"%lu groups", @"favorite groups plural label (%d != 1)")), (unsigned long)groupCount]];
-        }
-
-        toolTip = [NSString stringWithFormat:@"%@ - %@", [[node representedObject] nodeName], [tooltipParts componentsJoinedByString:@", "]];
-    }
-
-    return toolTip;
-}
-
-- (BOOL)outlineView:(NSOutlineView *)outlineView shouldSelectItem:(id)item
-{
-    // If this is a top level item, only allow the "Quick Connect" item to be selectable
-    if (![[item parentNode] parentNode]) {
-        return item == quickConnectItem;
-    }
-
-    // Otherwise allow all items to be selectable
-    return YES;
-}
-
-- (BOOL)outlineView:(NSOutlineView *)outlineView isItemExpandable:(id)item
-{
-    return (item != quickConnectItem && ![item isLeaf]);
-}
-
-- (BOOL)outlineView:(NSOutlineView *)outlineView shouldShowOutlineCellForItem:(id)item
-{
-    return ([[item parentNode] parentNode] != nil);
-}
-
-- (BOOL)outlineView:(NSOutlineView *)outlineView shouldCollapseItem:(id)item
-{
-    return ([[item parentNode] parentNode] != nil);
-}
-
-- (BOOL)outlineView:(NSOutlineView *)outlineView shouldEditTableColumn:(NSTableColumn *)tableColumn item:(id)item
-{
-    NSEvent *event = [NSApp currentEvent];
-    BOOL shiftTabbedIn = ([event type] == NSEventTypeKeyDown && [[event characters] length] && [[event characters] characterAtIndex:0] == NSBackTabCharacter);
-
-    if (shiftTabbedIn && [(SPFavoritesOutlineView *)outlineView justGainedFocus]) {
-        return NO;
-    }
-
-    return item != quickConnectItem;
-}
-
-- (void)outlineViewItemDidCollapse:(NSNotification *)notification
-{
-    [self _setNodeIsExpanded:NO fromNotification:notification];
-}
-
-- (void)outlineViewItemDidExpand:(NSNotification *)notification
-{
-    [self _setNodeIsExpanded:YES fromNotification:notification];
-}
-
-#pragma mark -
-#pragma mark Outline view drag & drop
-
-- (BOOL)outlineView:(NSOutlineView *)outlineView writeItems:(NSArray *)items toPasteboard:(NSPasteboard *)pboard
-{
-    // Prevent a drag which includes the outline title group from taking place
-    for (id item in items)
-    {
-        if (![[item parentNode] parentNode]) return NO;
-    }
-
-    // If the user is in the process of changing a node's name, trigger a save and prevent dragging.
-    if (isEditingItemName) {
+        [[node representedObject] setNodeName:newName];
         [favoritesController saveFavorites];
-
         [self _reloadFavoritesViewData];
-
-        isEditingItemName = NO;
-
-        return NO;
     }
-
-    [pboard declareTypes:@[SPFavoritesPasteboardDragType] owner:self];
-
-    BOOL result = [pboard setData:[NSData data] forType:SPFavoritesPasteboardDragType];
-
-    draggedNodes = items;
-
-    return result;
 }
 
-- (NSDragOperation)outlineView:(NSOutlineView *)outlineView validateDrop:(id <NSDraggingInfo>)info proposedItem:(id)item proposedChildIndex:(NSInteger)childIndex
+- (void)favoritesListDidReorderNodes
 {
-    NSDragOperation result = NSDragOperationNone;
-
-    // Prevent the top level or the quick connect item from being a target
-    if (!item || item == quickConnectItem) return result;
-
-    // Prevent dropping favorites on other favorites (non-groups)
-    if ((childIndex == NSOutlineViewDropOnItemIndex) && (![item isGroup])) return result;
-
-    // Ensure that none of the dragged nodes are being dragged into children of themselves; if they are,
-    // prevent the drag.
-    id itemToCheck = item;
-
-    do {
-        if ([draggedNodes containsObject:itemToCheck]) {
-            return result;
-        }
-    }
-    while ((itemToCheck = [itemToCheck parentNode]));
-
-    if ([info draggingSource] == outlineView) {
-        [outlineView setDropItem:item dropChildIndex:childIndex];
-
-        result = NSDragOperationMove;
-    }
-
-    return result;
-}
-
-- (BOOL)outlineView:(NSOutlineView *)outlineView acceptDrop:(id <NSDraggingInfo>)info item:(id)item childIndex:(NSInteger)childIndex
-{
-    BOOL acceptedDrop = NO;
-
-    if ((!item) || ([info draggingSource] != outlineView)) return acceptedDrop;
-
-    SPTreeNode *node = item ? item : [[[[favoritesRoot childNodes] objectAtIndex:0] childNodes] objectAtIndex:0];
-
-    // Cache the selected nodes for selection restoration afterwards
-    NSArray *preDragSelection = [self selectedFavoriteNodes];
-
-    // When manually reordering, set to unsorted to preserve the order
     currentSortItem = SPFavoritesSortUnsorted;
     reverseFavoritesSort = NO;
 
     [prefs setInteger:currentSortItem forKey:SPFavoritesSortedBy];
     [prefs setBool:NO forKey:SPFavoritesSortedInReverse];
 
-    // Uncheck sort by menu items
-    for (NSMenuItem *menuItem in [[favoritesSortByMenuItem submenu] itemArray])
-    {
+    for (NSMenuItem *menuItem in [[favoritesSortByMenuItem submenu] itemArray]) {
         [menuItem setState:NSControlStateValueOff];
     }
 
-    if (![draggedNodes count]) return acceptedDrop;
-
-    if ([node isGroup]) {
-        if (childIndex == NSOutlineViewDropOnItemIndex) {
-            childIndex = 0;
-        }
-        [outlineView expandItem:node];
-    }
-    else {
-        if (childIndex == NSOutlineViewDropOnItemIndex) {
-            childIndex = 0;
-        }
-    }
-
-    if (![[node representedObject] nodeName]) {
-        node = [[favoritesRoot childNodes] objectAtIndex:0];
-    }
-
-    NSMutableArray *childNodeArray = [node mutableChildNodes];
-
-    for (SPTreeNode *treeNode in draggedNodes)
-    {
-        // Remove the node from its old location
-        NSInteger oldIndex = [childNodeArray indexOfObject:treeNode];
-        NSInteger newIndex = childIndex;
-
-        if (oldIndex != NSNotFound) {
-            [childNodeArray removeObjectAtIndex:oldIndex];
-
-            if (childIndex > oldIndex) {
-                newIndex--;
-            }
-        }
-        else {
-            [[[treeNode parentNode] mutableChildNodes] removeObject:treeNode];
-        }
-
-        [childNodeArray insertObject:treeNode atIndex:newIndex];
-        newIndex++;
-    }
-
-    // Save the new order
-    [favoritesController saveFavorites];
-    [self _reloadFavoritesViewData];
-
     [[NSNotificationCenter defaultCenter] postNotificationName:SPConnectionFavoritesChangedNotification object:self];
-
     [[[SPAppDelegate preferenceController] generalPreferencePane] updateDefaultFavoritePopup];
+}
 
-    // Update the selection to account for rearranged favourites
-    NSMutableIndexSet *restoredSelection = [NSMutableIndexSet indexSet];
-    for (SPTreeNode *eachNode in preDragSelection) {
-        [restoredSelection addIndex:[favoritesOutlineView rowForItem:eachNode]];
+- (void)favoritesListEditingStateChangedWithIsEditing:(BOOL)isEditing
+{
+    if (!isEditing && isEditingConnection) {
+        [self _stopEditingConnection];
+        [favoritesOutlineView setNeedsDisplay:YES];
     }
-    [favoritesOutlineView selectRowIndexes:restoredSelection byExtendingSelection:NO];
+}
 
+- (BOOL)favoritesListShouldBeginDrag
+{
+    if (isEditingItemName) {
+        [favoritesController saveFavorites];
+        [self _reloadFavoritesViewData];
+        isEditingItemName = NO;
+        return NO;
+    }
     return YES;
 }
 
@@ -2893,7 +3978,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
     // If a 'name' field was edited, and is now of zero length, trigger a replacement
     // with a standard suggestion
-    if (((field == standardNameField) || (field == socketNameField) || (field == sshNameField)) && [self selectedFavoriteNode]) {
+    if (((field == standardNameField) || (field == awsIAMNameField) || (field == socketNameField) || (field == sshNameField) || (field == vaultNameField)) && [self selectedFavoriteNode]) {
         if (![[self _stripInvalidCharactersFromString:[field stringValue]] length]) {
             [self controlTextDidEndEditing:notification];
         }
@@ -2901,7 +3986,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
     [self _startEditingConnection];
 
-    if (favoriteNameFieldWasAutogenerated && (field != standardNameField && field != socketNameField && field != sshNameField)) {
+    if (favoriteNameFieldWasAutogenerated && (field != standardNameField && field != awsIAMNameField && field != socketNameField && field != sshNameField && field != vaultNameField)) {
         [self setName:[self _generateNameForConnection]];
     }
 
@@ -2921,7 +4006,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     // Handle updates to the 'name' field of the selected favourite.  The favourite name should
     // have leading or trailing spaces removed at the end of editing, and if it's left empty,
     // should have a default name set.
-    if (((field == standardNameField) || (field == socketNameField) || (field == sshNameField)) && [self selectedFavoriteNode]) {
+    if (((field == standardNameField) || (field == awsIAMNameField) || (field == socketNameField) || (field == sshNameField) || (field == vaultNameField)) && [self selectedFavoriteNode]) {
 
         NSString *favoriteName = [self _stripInvalidCharactersFromString:[field stringValue]];
 
@@ -2969,7 +4054,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         // check we don't already have this window open
         BOOL correspondingWindowFound = NO;
         for(id win in [NSApp windows]) {
-            if([[win delegate] isKindOfClass:[SPBundleHTMLOutputController class]]) {
+            if([[win delegate] isKindOfClass:[SABundleHTMLOutputWindowController class]]) {
                 if([[[win delegate] windowUUID] isEqualToString:socketHelpWindowUUID]) {
                     correspondingWindowFound = YES;
                     SPLog(@"correspondingWindowFound: %hhd", correspondingWindowFound);
@@ -2986,8 +4071,13 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
                 // show socket help
                 self.socketHelpWindowUUID = [NSString stringWithNewUUID];
-                SPBundleHTMLOutputController *bundleController = [[SPBundleHTMLOutputController alloc] init];
+                SABundleHTMLOutputWindowController *bundleController = [[SABundleHTMLOutputWindowController alloc] init];
                 [bundleController setWindowUUID:socketHelpWindowUUID];
+
+                // Remember that the socket help has been shown once the user closes its window.
+                bundleController.windowWillCloseHandler = ^{
+                    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:SPConnectionShownSocketHelp];
+                };
 
                 NSDictionary *tmpDic2 = @{@"x" : @225, @"y" : @536, @"w" : @768, @"h" : @425};
                 NSDictionary *tmpDict = @{SPConnectionShownSocketHelp : @YES, @"frame" : tmpDic2};
@@ -3014,8 +4104,6 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
                 if(error == nil){
                     [SPBundleManager.shared addHTMLOutputController:bundleController];
                 }
-                // set straight away, or wait for them to close the window?
-                //[prefs setBool:YES forKey:SPConnectionShownSocketHelp];
             }
         }
     }
@@ -3050,16 +4138,23 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
     // Scroll view is smaller than contents - keep positioned at top.
     if (scrollViewFrame.size.height < connectionDetailsFrame.size.height + 10) {
-        if (connectionDetailsFrame.origin.y != 0) {
-            connectionDetailsFrame.origin.y = 0;
-            [connectionResizeContainer setFrame:connectionDetailsFrame];
-            scrollDocumentFrame.size.height = connectionDetailsFrame.size.height + 10;
-            [[connectionDetailsScrollView documentView] setFrame:scrollDocumentFrame];
-        }
+        connectionDetailsFrame.origin.y = 0;
+        [connectionResizeContainer setFrame:connectionDetailsFrame];
+        scrollDocumentFrame.size.height = connectionDetailsFrame.size.height + 10;
+        [[connectionDetailsScrollView documentView] setFrame:scrollDocumentFrame];
+
+        // Keep the visible area pinned to the top of the connection form.
+        NSClipView *clipView = [connectionDetailsScrollView contentView];
+        BOOL documentIsFlipped = [[connectionDetailsScrollView documentView] isFlipped];
+        CGFloat topY = documentIsFlipped ? 0.f : MAX(0.f, NSMaxY(scrollDocumentFrame) - NSHeight([clipView bounds]));
+        [clipView scrollToPoint:NSMakePoint(0.f, topY)];
+        [connectionDetailsScrollView reflectScrolledClipView:clipView];
     }
     // Otherwise, center
     else {
-        connectionDetailsFrame.origin.y = (scrollViewFrame.size.height - connectionDetailsFrame.size.height)/3;
+        // Keep near-centered placement, with a slight upward bias so the details don't appear too low.
+        CGFloat availableVerticalSpace = scrollViewFrame.size.height - connectionDetailsFrame.size.height;
+        connectionDetailsFrame.origin.y = availableVerticalSpace * 0.58f;
         // the division may lead to values that are not valid for the current screen size (e.g. non-integer values on a
         // @1x non-retina screen). The OS works something out when not using layer-backed views, but in the latter
         // case the result will look like garbage if we don't fix this.
@@ -3104,6 +4199,11 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     // import does not depend on a selection
     if(action == @selector(importFavorites:)) return YES;
 
+    // Copy connection string requires a single non-group favorite
+    if (action == @selector(copyConnectionString:)) {
+        return (selectedRows == 1) && (![node isGroup]);
+    }
+
     if (node == quickConnectItem) return NO;
 
     // Remove/rename the selected node
@@ -3145,32 +4245,226 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)favoritesImportData:(NSArray *)data
 {
-    SPTreeNode *newNode;
-    NSMutableArray *importedNodes = [NSMutableArray array];
-    NSMutableIndexSet *importedIndexSet = [NSMutableIndexSet indexSet];
+    if ([data count] == 0) return;
 
-    // Add each of the imported favorites to the root node
-    for (NSMutableDictionary *favorite in data)
-    {
-        newNode = [favoritesController addFavoriteNodeWithData:favorite asChildOfNode:nil];
-        [importedNodes addObject:newNode];
+    NSMutableArray *preparedImportData = [NSMutableArray arrayWithCapacity:[data count]];
+    for (NSDictionary *item in data) {
+        [preparedImportData addObject:[self favoriteImportDictionaryByAssigningNewIDs:item]];
     }
 
-    if (currentSortItem > SPFavoritesSortUnsorted) {
-        [self _sortFavorites];
+    NSMutableArray *importFavorites = [NSMutableArray array];
+    [self collectFavoriteImportLeavesFromItems:preparedImportData intoArray:importFavorites];
+
+    // Check for duplicates in imported favorites, including favorites nested in groups.
+    NSMutableArray *duplicates = [NSMutableArray array];
+
+    for (NSDictionary *favorite in importFavorites) {
+        NSString *host = [favorite objectForKey:SPFavoriteHostKey] ?: @"";
+        NSString *user = [favorite objectForKey:SPFavoriteUserKey] ?: @"";
+        NSString *database = [favorite objectForKey:SPFavoriteDatabaseKey] ?: @"";
+        NSString *port = [favorite objectForKey:SPFavoritePortKey] ?: @"";
+        NSInteger typeInt = [[favorite objectForKey:SPFavoriteTypeKey] integerValue];
+
+        // Use centralized helper for type mapping
+        NSString *typeString = [SPConnectionController stringForFavoriteTypeTag:typeInt];
+
+        SPTreeNode *duplicateNode = [self findDuplicateFavoriteForHost:host
+                                                                  user:user
+                                                              database:database
+                                                                  port:port
+                                                                  type:typeString
+                                                    modeSpecificFields:favorite];
+
+        if (duplicateNode) {
+            [duplicates addObject:@{@"favorite": favorite, @"node": duplicateNode}];
+        }
     }
 
-    [self _reloadFavoritesViewData];
+    // Handle duplicates
+    if ([duplicates count] > 0) {
+        // Create duplicate items for the UI
+        NSMutableArray<SPDuplicateImportItem *> *duplicateItems = [NSMutableArray array];
 
-    // Select the new nodes and scroll into view
-    for (SPTreeNode *eachNode in importedNodes)
-    {
-        [importedIndexSet addIndex:[favoritesOutlineView rowForItem:eachNode]];
+        for (NSDictionary *dupInfo in duplicates) {
+            NSDictionary *favorite = [dupInfo objectForKey:@"favorite"];
+            SPTreeNode *node = [dupInfo objectForKey:@"node"];
+
+            NSString *favoriteName = [favorite objectForKey:SPFavoriteNameKey] ?: @"Unnamed";
+            NSString *host = [favorite objectForKey:SPFavoriteHostKey] ?: @"";
+
+            SPDuplicateImportItem *item = [[SPDuplicateImportItem alloc] initWithFavoriteName:favoriteName
+                                                                                          host:host
+                                                                                      favorite:favorite
+                                                                                 duplicateNode:node];
+            [duplicateItems addObject:item];
+        }
+
+        NSString *message;
+        if ([duplicates count] == 1) {
+            message = NSLocalizedString(@"1 duplicate connection found. Choose an action for each:", @"1 duplicate found");
+        } else {
+            message = [NSString stringWithFormat:NSLocalizedString(@"%ld duplicate connections found. Choose an action for each:", @"Multiple duplicates found"), (long)[duplicates count]];
+        }
+
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert setMessageText:NSLocalizedString(@"Duplicate Connections Found", @"Duplicate connections found")];
+        [alert setInformativeText:message];
+
+        // Add custom accessory view
+        NSView *accessoryView = [SPDuplicateImportHelper createAccessoryViewWithDuplicateItems:duplicateItems];
+        [alert setAccessoryView:accessoryView];
+
+        [alert addButtonWithTitle:NSLocalizedString(@"Import", @"Import button")];
+        [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"Cancel button")];
+
+        [alert beginSheetModalForWindow:[dbDocument parentWindowControllerWindow] completionHandler:^(NSModalResponse returnCode) {
+            if (returnCode != NSAlertFirstButtonReturn) {
+                // Cancel
+                SPDuplicateActionHandler.shared.items = @[];
+                return;
+            }
+
+            NSMutableArray *importedNodes = [NSMutableArray array];
+            NSMutableIndexSet *importedIndexSet = [NSMutableIndexSet indexSet];
+
+            // Process each duplicate based on selected action
+            for (SPDuplicateImportItem *item in duplicateItems) {
+                if (item.action == SPDuplicateActionUpdate) {
+                    // Update existing (no password from plist imports)
+                    [self updateFavoriteNode:item.duplicateNode withData:item.favorite password:nil];
+                    [importedNodes addObject:item.duplicateNode];
+                }
+                // Create New entries stay in itemsToImport so grouped imports keep their structure.
+                // If Skip - the duplicate leaf is filtered out below.
+            }
+
+            NSArray *itemsToImport = [self favoriteImportItemsByApplyingDuplicateActionsToItems:preparedImportData duplicateItems:duplicateItems];
+
+            // Add remaining imported items. This preserves imported groups while removing skipped or updated duplicate leaves.
+            for (NSMutableDictionary *favorite in itemsToImport) {
+                SPTreeNode *newNode = [self->favoritesController addFavoriteNodeWithData:favorite asChildOfNode:nil];
+                [importedNodes addObject:newNode];
+            }
+
+            if (self->currentSortItem > SPFavoritesSortUnsorted) {
+                [self _sortFavorites];
+            }
+
+            [self _reloadFavoritesViewData];
+
+            // Select the imported nodes and scroll into view
+            for (SPTreeNode *eachNode in importedNodes) {
+                NSInteger row = [self->favoritesOutlineView rowForItem:eachNode];
+                // Guard against -1 before adding to index set
+                if (row != -1) {
+                    [importedIndexSet addIndex:(NSUInteger)row];
+                }
+            }
+
+            if ([importedIndexSet count] > 0) {
+                [self->favoritesOutlineView selectRowIndexes:importedIndexSet byExtendingSelection:NO];
+                [self _scrollToSelectedNode];
+            }
+
+            // Clear singleton items to prevent memory leak
+            SPDuplicateActionHandler.shared.items = @[];
+        }];
+    }
+    else {
+        // No duplicates - import all normally
+        NSMutableArray *importedNodes = [NSMutableArray array];
+        NSMutableIndexSet *importedIndexSet = [NSMutableIndexSet indexSet];
+
+        for (NSMutableDictionary *favorite in preparedImportData) {
+            SPTreeNode *newNode = [favoritesController addFavoriteNodeWithData:favorite asChildOfNode:nil];
+            [importedNodes addObject:newNode];
+        }
+
+        if (currentSortItem > SPFavoritesSortUnsorted) {
+            [self _sortFavorites];
+        }
+
+        [self _reloadFavoritesViewData];
+
+        // Select the new nodes and scroll into view
+        for (SPTreeNode *eachNode in importedNodes) {
+            NSInteger row = [favoritesOutlineView rowForItem:eachNode];
+            if (row != -1) {
+                [importedIndexSet addIndex:(NSUInteger)row];
+            }
+        }
+
+        if ([importedIndexSet count] > 0) {
+            [favoritesOutlineView selectRowIndexes:importedIndexSet byExtendingSelection:NO];
+            [self _scrollToSelectedNode];
+        }
+    }
+}
+
+- (NSMutableDictionary *)favoriteImportDictionaryByAssigningNewIDs:(NSDictionary *)item
+{
+    NSMutableDictionary *mutableItem = [item mutableCopy];
+    NSArray *children = [item objectForKey:SPFavoriteChildrenKey];
+
+    if (children) {
+        NSMutableArray *preparedChildren = [NSMutableArray arrayWithCapacity:[children count]];
+        for (NSDictionary *child in children) {
+            [preparedChildren addObject:[self favoriteImportDictionaryByAssigningNewIDs:child]];
+        }
+        [mutableItem setObject:preparedChildren forKey:SPFavoriteChildrenKey];
+    }
+    else {
+        [mutableItem setObject:[self _createNewFavoriteID] forKey:SPFavoriteIDKey];
     }
 
-    [favoritesOutlineView selectRowIndexes:importedIndexSet byExtendingSelection:NO];
+    return mutableItem;
+}
 
-    [self _scrollToSelectedNode];
+- (void)collectFavoriteImportLeavesFromItems:(NSArray *)items intoArray:(NSMutableArray *)favorites
+{
+    for (NSDictionary *item in items) {
+        NSArray *children = [item objectForKey:SPFavoriteChildrenKey];
+
+        if (children) {
+            [self collectFavoriteImportLeavesFromItems:children intoArray:favorites];
+        }
+        else {
+            [favorites addObject:item];
+        }
+    }
+}
+
+- (NSArray *)favoriteImportItemsByApplyingDuplicateActionsToItems:(NSArray *)items duplicateItems:(NSArray<SPDuplicateImportItem *> *)duplicateItems
+{
+    NSMutableArray *filteredItems = [NSMutableArray array];
+
+    for (NSMutableDictionary *item in items) {
+        NSArray *children = [item objectForKey:SPFavoriteChildrenKey];
+
+        if (children) {
+            NSArray *filteredChildren = [self favoriteImportItemsByApplyingDuplicateActionsToItems:children duplicateItems:duplicateItems];
+            if ([filteredChildren count] > 0 || [children count] == 0) {
+                NSMutableDictionary *groupCopy = [item mutableCopy];
+                [groupCopy setObject:filteredChildren forKey:SPFavoriteChildrenKey];
+                [filteredItems addObject:groupCopy];
+            }
+            continue;
+        }
+
+        BOOL shouldImport = YES;
+        for (SPDuplicateImportItem *duplicateItem in duplicateItems) {
+            if (duplicateItem.favorite == item) {
+                shouldImport = (duplicateItem.action == SPDuplicateActionCreateNew);
+                break;
+            }
+        }
+
+        if (shouldImport) {
+            [filteredItems addObject:item];
+        }
+    }
+
+    return filteredItems;
 }
 
 /**
@@ -3197,25 +4491,12 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 #pragma mark -
 #pragma mark Private API
 
-/**
- * Sets the expanded state of the node from the supplied outline view notification.
- *
- * @param expanded     The state of the node
- * @param notification The notification genrated from the state change
- */
-- (void)_setNodeIsExpanded:(BOOL)expanded fromNotification:(NSNotification *)notification
-{
-    SPGroupNode *node = [[[notification userInfo] valueForKey:@"NSObject"] representedObject];
-
-    [node setNodeIsExpanded:expanded];
-}
-
 #pragma mark - SPConnectionControllerInitializer
 
 /**
  * Initialise the connection controller, linking it to the parent document and setting up the parent window.
  */
-- (instancetype)initWithDocument:(SPDatabaseDocument *)document
+- (instancetype)initWithDocument:(id<SADatabaseDocumentProviding>)document
 {
 
     SPLog(@"initWithDocument");
@@ -3225,7 +4506,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         // Weak reference
         dbDocument = document;
 
-        databaseConnectionView = dbDocument->contentViewSplitter;
+        databaseConnectionView = [dbDocument contentViewSplitter];
 
 
         // Keychain references
@@ -3251,40 +4532,50 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         [sshColorField      bind:@"selectedTag" toObject:self withKeyPath:@"colorIndex" options:nil];
         [standardColorField setColorList:colorList];
         [standardColorField bind:@"selectedTag" toObject:self withKeyPath:@"colorIndex" options:nil];
+        [awsIAMColorField setColorList:colorList];
+        [awsIAMColorField bind:@"selectedTag" toObject:self withKeyPath:@"colorIndex" options:nil];
+        [vaultColorField setColorList:colorList];
+        [vaultColorField bind:@"selectedTag" toObject:self withKeyPath:@"colorIndex" options:nil];
         [socketColorField setColorList:colorList];
         [socketColorField   bind:@"selectedTag" toObject:self withKeyPath:@"colorIndex" options:nil];
 
         // An instance of NSMenuItem can not be assigned to more than one menu so we have to clone items.
         // Cannot bulk set items on macOS < 10.14, must removeAllItems and addItem https://github.com/Sequel-Ace/Sequel-Ace/issues/403
         [standardTimeZoneField.menu removeAllItems];
+        [awsIAMTimeZoneField.menu removeAllItems];
+        [vaultTimeZoneField.menu removeAllItems];
         [sshTimeZoneField.menu removeAllItems];
         [socketTimeZoneField.menu removeAllItems];
         for (NSMenuItem *menuItem in [self generateTimeZoneMenuItems]) {
             [standardTimeZoneField.menu addItem:[menuItem copy]];
+            [awsIAMTimeZoneField.menu addItem:[menuItem copy]];
+            [vaultTimeZoneField.menu addItem:[menuItem copy]];
             [sshTimeZoneField.menu addItem:[menuItem copy]];
             [socketTimeZoneField.menu addItem:[menuItem copy]];
         }
 
+        [connectionDetailsScrollView setPostsFrameChangedNotifications:YES];
+        [[connectionDetailsScrollView contentView] setPostsFrameChangedNotifications:YES];
+        [self setUpPasswordRevealButtons];
+
         [self registerForNotifications];
 
-        // Hide the main view and position and display the connection view
-        [databaseConnectionView setHidden:YES];
-        [connectionView setFrame:[databaseConnectionView frame]];
-        [[dbDocument databaseView] addSubview:connectionView];
+        // Create the view coordinator and show the connection view
+        self.viewCoordinator = [[SAConnectionViewCoordinator alloc]
+            initWithDatabaseContentView:databaseConnectionView
+            containerView:[dbDocument databaseView]];
+        [self.viewCoordinator showConnectionView:connectionView];
 
         // Set up the splitview
         [connectionSplitView setMinSize:150.f ofSubviewAtIndex:0];
         [connectionSplitView setMinSize:445.f ofSubviewAtIndex:1];
-
-        // Generic folder image for use in the outline view's groups
-        folderImage = [[NSWorkspace sharedWorkspace] iconForFileType:NSFileTypeForHFSTypeCode(kGenericFolderIcon)];
-        [folderImage setSize:NSMakeSize(16, 16)];
 
         // Set up a keychain instance and preferences reference, and create the initial favorites list
         keychain = [[SPKeychain alloc] init];
         prefs = [NSUserDefaults standardUserDefaults];
 
         bookmarks = [NSMutableArray arrayWithArray:SecureBookmarkManager.sharedInstance.bookmarks];
+        awsAvailableRegionValues = [AWSIAMAuthManager cachedOrFallbackRegions];
 
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(_refreshBookmarks) name:SPBookmarksChangedNotification object:SecureBookmarkManager.sharedInstance];
 
@@ -3292,22 +4583,25 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         // and the tree to be constructed.
         favoritesController = [SPFavoritesController sharedFavoritesController];
 
-        // Tree references
+        // Set up the favorites list data source (owns tree data, Quick Connect item, outline view delegate)
         favoritesRoot = [favoritesController favoritesTree];
         currentFavorite = nil;
 
-        // Create the "Quick Connect" placeholder group
-        quickConnectItem = [SPTreeNode treeNodeWithRepresentedObject:[SPGroupNode groupNodeWithName:[NSLocalizedString(@"Quick Connect", @"Quick connect item label") uppercaseString]]];
-        [quickConnectItem setIsGroup:YES];
+        self.favoritesListDataSource = [[SAFavoritesListDataSource alloc]
+            initWithFavoritesRoot:favoritesRoot
+            favoritesController:favoritesController];
+        self.favoritesListDataSource.delegate = (id<SAFavoritesListDelegate>)self;
 
-        // Create a NSOutlineView cell for the Quick Connect group
-        quickConnectCell = [[SPFavoriteTextFieldCell alloc] init];
-        [quickConnectCell setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+        // Keep local references in sync with the data source
+        quickConnectItem = self.favoritesListDataSource.quickConnectItem;
+        quickConnectCell = self.favoritesListDataSource.quickConnectCell;
+        folderImage = self.favoritesListDataSource.folderImage;
 
-        // Update the UI
-        [self _reloadFavoritesViewData];
+        // Attach the data source to the outline view and set up remaining outline view config
+        [self.favoritesListDataSource attachTo:favoritesOutlineView];
         [self setUpFavoritesOutlineView];
-        [self _restoreOutlineViewStateNode:favoritesRoot];
+        [self.favoritesListDataSource reloadDataIn:favoritesOutlineView];
+        [self.favoritesListDataSource restoreOutlineViewState:favoritesRoot in:favoritesOutlineView];
 
         // Set up the selected favourite, and scroll after a small delay to fix animation delay on Lion
         [self setUpSelectedConnectionFavorite];
@@ -3319,16 +4613,160 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
         currentSortItem = (SPFavoritesSortItem)[prefs integerForKey:SPFavoritesSortedBy];
         reverseFavoritesSort = [prefs boolForKey:SPFavoritesSortedInReverse];
 
+        // Update AWS authorization UI state and kick off async region refresh.
+        [self updateAWSAuthorizationUI];
+        [self _refreshAWSAvailableRegions];
+
+        // Track profile/region edits the same way as the IAM toggle.
+        [awsProfilePopup setTarget:self];
+        [awsProfilePopup setAction:@selector(updateAWSIAMInterface:)];
+        [awsRegionComboBox setTarget:self];
+        [awsRegionComboBox setAction:@selector(updateAWSIAMInterface:)];
+
+        // Initialize the connection service
+        self.connectionService = [[SAConnectionService alloc] init];
+        if ([dbDocument conformsToProtocol:@protocol(SPMySQLConnectionDelegate)]) {
+            self.connectionService.mySQLDelegate = (id<SPMySQLConnectionDelegate>)dbDocument;
+        }
+
         initComplete = YES;
+
+        // Force a resize after a tiny delay to ensure view is fully loaded
+        [self performSelector:@selector(_forceInitialResize) withObject:nil afterDelay:0.0];
     }
 
     return self;
+}
+
+- (void)_forceInitialResize {
+    [self resizeTabViewToConnectionType:[self type] animating:NO];
+}
+
+- (void)setUpPasswordRevealButtons
+{
+    [self addPasswordRevealButtonForField:standardPasswordField keyPath:@"password"];
+    [self addPasswordRevealButtonForField:socketPasswordField keyPath:@"password"];
+    [self addPasswordRevealButtonForField:sshPasswordField keyPath:@"password"];
+    [self addPasswordRevealButtonForField:sshSSHPasswordField keyPath:@"sshPassword"];
+}
+
+- (void)addPasswordRevealButtonForField:(NSSecureTextField *)field keyPath:(NSString *)keyPath
+{
+    if (!field || !field.superview) {
+        return;
+    }
+
+    NSRect fieldFrame = field.frame;
+    CGFloat buttonSize = 18.f;
+
+    NSTextField *plainField = [[NSTextField alloc] initWithFrame:fieldFrame];
+    plainField.hidden = YES;
+    plainField.autoresizingMask = field.autoresizingMask;
+    plainField.toolTip = field.toolTip;
+    plainField.font = field.font;
+    plainField.delegate = field.delegate;
+    plainField.editable = field.editable;
+    plainField.selectable = field.selectable;
+    plainField.enabled = field.enabled;
+    plainField.bezelStyle = field.bezelStyle;
+    plainField.drawsBackground = field.drawsBackground;
+    plainField.lineBreakMode = field.lineBreakMode;
+    plainField.usesSingleLineMode = field.cell.usesSingleLineMode;
+    [plainField bind:@"value" toObject:self withKeyPath:keyPath options:@{NSContinuouslyUpdatesValueBindingOption: @YES}];
+    [field.superview addSubview:plainField positioned:NSWindowAbove relativeTo:field];
+
+    NSButton *button = [[SPPasswordRevealButton alloc] initWithFrame:NSMakeRect(NSMaxX(fieldFrame) - buttonSize - 6.f,
+                                                                                fieldFrame.origin.y + floor((fieldFrame.size.height - buttonSize) / 2.f),
+                                                                                buttonSize,
+                                                                                buttonSize)];
+    button.buttonType = NSButtonTypeToggle;
+    button.bezelStyle = NSBezelStyleTexturedRounded;
+    button.bordered = NO;
+    button.autoresizingMask = NSViewMinXMargin;
+    button.imagePosition = NSImageOnly;
+    button.imageScaling = NSImageScaleProportionallyDown;
+    button.toolTip = NSLocalizedString(@"Show password", @"Show password tooltip");
+
+    NSImage *image = nil;
+    NSImage *alternateImage = nil;
+    if ([NSImage respondsToSelector:@selector(imageWithSystemSymbolName:accessibilityDescription:)]) {
+        image = [NSImage imageWithSystemSymbolName:@"eye" accessibilityDescription:NSLocalizedString(@"Show password", @"Show password tooltip")];
+        alternateImage = [NSImage imageWithSystemSymbolName:@"eye.slash" accessibilityDescription:NSLocalizedString(@"Hide password", @"Hide password tooltip")];
+    }
+
+    if (image) {
+        image.template = YES;
+        if (alternateImage) {
+            alternateImage.template = YES;
+        }
+        button.image = image;
+    }
+    else {
+        button.title = NSLocalizedString(@"Show", @"Fallback password reveal button title");
+    }
+
+    objc_setAssociatedObject(button, kPasswordFieldKey, field, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(button, kPlainPasswordFieldKey, plainField, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(button, kRevealPasswordImageKey, image, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(button, kHidePasswordImageKey, alternateImage, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    button.target = self;
+    button.action = @selector(toggleConnectionPasswordVisibility:);
+
+    [field.superview addSubview:button positioned:NSWindowAbove relativeTo:plainField];
+}
+
+- (void)toggleConnectionPasswordVisibility:(NSButton *)sender
+{
+    NSSecureTextField *secureField = objc_getAssociatedObject(sender, kPasswordFieldKey);
+    NSTextField *plainField = objc_getAssociatedObject(sender, kPlainPasswordFieldKey);
+
+    if (!secureField || !plainField) {
+        return;
+    }
+
+    BOOL shouldReveal = (sender.state == NSControlStateValueOn);
+    plainField.stringValue = secureField.stringValue ?: @"";
+    secureField.hidden = shouldReveal;
+    plainField.hidden = !shouldReveal;
+
+    NSImage *revealImage = objc_getAssociatedObject(sender, kRevealPasswordImageKey);
+    NSImage *hideImage = objc_getAssociatedObject(sender, kHidePasswordImageKey);
+
+    if (revealImage && hideImage) {
+        sender.image = shouldReveal ? hideImage : revealImage;
+    }
+    else {
+        sender.title = shouldReveal ?
+            NSLocalizedString(@"Hide", @"Fallback password hide button title") :
+            NSLocalizedString(@"Show", @"Fallback password reveal button title");
+    }
+
+    sender.toolTip = shouldReveal ?
+        NSLocalizedString(@"Hide password", @"Hide password tooltip") :
+        NSLocalizedString(@"Show password", @"Show password tooltip");
+
+    [sender.superview addSubview:sender positioned:NSWindowAbove relativeTo:nil];
+
+    if (shouldReveal && [[secureField window] firstResponder] == secureField) {
+        [[secureField window] makeFirstResponder:plainField];
+    }
+    else if (!shouldReveal && [[plainField window] firstResponder] == plainField) {
+        secureField.stringValue = plainField.stringValue ?: @"";
+        [[plainField window] makeFirstResponder:secureField];
+    }
 }
 
 - (void)_refreshBookmarks{
     SPLog(@"Got SPBookmarksChangedNotification, refreshing bookmarks");
 
     [bookmarks setArray:SecureBookmarkManager.sharedInstance.bookmarks];
+
+    // Also refresh AWS authorization UI in case AWS directory bookmark changed
+    [self updateAWSAuthorizationUI];
+
+    // Notify that profiles may have changed
+    [self willChangeValueForKey:@"awsAvailableProfiles"];
+    [self didChangeValueForKey:@"awsAvailableProfiles"];
 }
 
 // TODO: this is called once per connection screen - but the timezones don't change right? Should be static/class method?
@@ -3391,7 +4829,11 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [nc addObserver:self
            selector:@selector(scrollViewFrameChanged:)
                name:NSViewFrameDidChangeNotification
-             object:nil];
+             object:connectionDetailsScrollView];
+    [nc addObserver:self
+           selector:@selector(scrollViewFrameChanged:)
+               name:NSViewFrameDidChangeNotification
+             object:[connectionDetailsScrollView contentView]];
     [nc addObserver:self
            selector:@selector(_processFavoritesDataChange:)
                name:SPConnectionFavoritesChangedNotification
@@ -3479,6 +4921,11 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
               context:NULL];
 
     [self addObserver:self
+           forKeyPath:SPFavoriteSSHRemoteSocketPathKey
+              options:(NSKeyValueObservingOptionOld | NSKeyValueObservingOptionNew)
+              context:NULL];
+
+    [self addObserver:self
            forKeyPath:SPFavoriteSSLKeyFileLocationEnabledKey
               options:(NSKeyValueObservingOptionOld | NSKeyValueObservingOptionNew)
               context:NULL];
@@ -3518,9 +4965,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [favoritesOutlineView setTarget:self];
     [favoritesOutlineView setDoubleAction:@selector(nodeDoubleClicked:)];
 
-    // Register drag types for the favorites outline view
-    [favoritesOutlineView registerForDraggedTypes:@[SPFavoritesPasteboardDragType]];
-    [favoritesOutlineView setDraggingSourceOperationMask:NSDragOperationMove forLocal:YES];
+    [self setUpFavoritesSearchField];
+
+    // Drag types and data source/delegate are handled by favoritesListDataSource via -attachTo:
 
     NSFont *tableFont = [NSUserDefaults getFont];
     [favoritesOutlineView setRowHeight:4.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
@@ -3529,12 +4976,76 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     for (NSTableColumn *col in [favoritesOutlineView tableColumns]) {
         [[col dataCell] setFont:tableFont];
     }
-    
+
     // Register for font change notifications
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(fontChanged:)
                                                  name:@"SPFontChangedNotification"
                                                object:nil];
+}
+
+/**
+ * Configures the favorites search field: sets self as text delegate (so Down arrow can
+ * forward focus into the outline view), and installs a local key-event monitor so that
+ * ⌘F focuses the search field whenever the connection window is key.
+ */
+- (void)setUpFavoritesSearchField
+{
+    favoritesSearchField.delegate = self;
+
+    if (favoritesSearchKeyMonitor) return;
+
+    __weak SPConnectionController *weakSelf = self;
+    favoritesSearchKeyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                                                     handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
+        SPConnectionController *strongSelf = weakSelf;
+        if (!strongSelf) return event;
+        NSSearchField *field = strongSelf->favoritesSearchField;
+        NSView *connView = strongSelf->connectionView;
+        if (!field || !connView) return event;
+
+        BOOL cmdPressed = ([event modifierFlags] & NSEventModifierFlagCommand) != 0;
+        BOOL isCmdF = cmdPressed && [[event charactersIgnoringModifiers] isEqualToString:@"f"];
+        if (!isCmdF) return event;
+
+        NSWindow *window = [connView window];
+        if (!window || [NSApp keyWindow] != window) return event;
+        if ([connView isHiddenOrHasHiddenAncestor]) return event;
+
+        [window makeFirstResponder:field];
+        return nil; // consume
+    }];
+}
+
+#pragma mark - NSTextFieldDelegate (favorites search field)
+
+/**
+ * Handles arrow-down in the search field: moves keyboard focus into the
+ * favorites outline view and selects the first favorite if nothing is selected.
+ */
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector
+{
+    if (control != favoritesSearchField) return NO;
+    if (commandSelector != @selector(moveDown:)) return NO;
+
+    NSWindow *window = [favoritesOutlineView window];
+    if (!window) return NO;
+    [window makeFirstResponder:favoritesOutlineView];
+
+    if ([favoritesOutlineView selectedRow] < 0) {
+        // Row 0 is Quick Connect; pick the first selectable row after it.
+        for (NSInteger row = 1; row < [favoritesOutlineView numberOfRows]; row++) {
+            id item = [favoritesOutlineView itemAtRow:row];
+            if ([favoritesOutlineView.delegate respondsToSelector:@selector(outlineView:shouldSelectItem:)]
+                && ![favoritesOutlineView.delegate outlineView:favoritesOutlineView shouldSelectItem:item]) {
+                continue;
+            }
+            [favoritesOutlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
+            [favoritesOutlineView scrollRowToVisible:row];
+            break;
+        }
+    }
+    return YES;
 }
 
 /**
@@ -3597,107 +5108,15 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [favoritesOutlineView selectRowIndexes:selectionIndexes byExtendingSelection:NO];
 }
 
-/**
- * Restores the outline views group nodes expansion state.
- *
- * @param node The node to traverse
- */
-- (void)_restoreOutlineViewStateNode:(SPTreeNode *)node
-{
-    if ([node isGroup]) {
-        if ([[node representedObject] nodeIsExpanded]) {
-            [favoritesOutlineView expandItem:node];
-        }
-        else {
-            [favoritesOutlineView collapseItem:node];
-        }
-
-        for (SPTreeNode *childNode in [node childNodes])
-        {
-            if ([childNode isGroup]) {
-                [self _restoreOutlineViewStateNode:childNode];
-            }
-        }
-    }
-}
-
-#pragma mark - SPConnectionControllerDataSource
-
-/**
- * Return the number of children for the specified item in the favourites tree.
- * Note that to support the "Quick Connect" entry, the returned count is amended
- * for the top level.
- */
-- (NSInteger)outlineView:(NSOutlineView *)outlineView numberOfChildrenOfItem:(id)item
-{
-    SPTreeNode *node = (item == nil ? favoritesRoot : (SPTreeNode *)item);
-
-    // If at the root, return the count plus one for the "Quick Connect" entry
-    if (!item) {
-        return [[node childNodes] count] + 1;
-    }
-
-    return [[node childNodes] count];
-}
-
-/**
- * Return the branch at the specified index of a supplied tree level.
- * Note that to support the "Quick Connect" entry, children of the top level
- * have their offsets amended.
- */
-- (id)outlineView:(NSOutlineView *)outlineView child:(NSInteger)childIndex ofItem:(id)item
-{
-    // For the top level of the tree, return the "Quick Connect" child for position zero;
-    // amend all other positions to compensate for the faked position.
-    if (!item) {
-        if (childIndex == 0) {
-            return quickConnectItem;
-        }
-
-        childIndex--;
-    }
-
-    SPTreeNode *node = (item == nil ? favoritesRoot : (SPTreeNode *)item);
-
-    return [[node childNodes] safeObjectAtIndex:childIndex];
-}
-
-- (id)outlineView:(NSOutlineView *)outlineView objectValueForTableColumn:(NSTableColumn *)tableColumn byItem:(id)item
-{
-    SPTreeNode *node = (SPTreeNode *)item;
-
-    return (![node isGroup]) ? [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteNameKey] : [[node representedObject] nodeName];
-}
-
-- (void)outlineView:(NSOutlineView *)outlineView setObjectValue:(id)object forTableColumn:(NSTableColumn *)tableColumn byItem:(id)item
-{
-    NSString *newName = [object stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-
-    if ([newName length]) {
-
-        // Get the node that was renamed
-        SPTreeNode *node = [self selectedFavoriteNode];
-
-        if (![node isGroup]) {
-
-            // Updating the name triggers a KVO update
-            [self setName:newName];
-            [self _saveCurrentDetailsCreatingNewFavorite:NO validateDetails:NO];
-        }
-        else {
-            [[node representedObject] setNodeName:newName];
-
-            [favoritesController saveFavorites];
-
-            [self _reloadFavoritesViewData];
-        }
-    }
-}
-
 #pragma mark -
 
 - (void)dealloc
 {
+    if (favoritesSearchKeyMonitor) {
+        [NSEvent removeMonitor:favoritesSearchKeyMonitor];
+        favoritesSearchKeyMonitor = nil;
+    }
+
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSObject cancelPreviousPerformRequestsWithTarget:self];
 
@@ -3718,6 +5137,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
     [self removeObserver:self forKeyPath:SPFavoriteSSHPortKey];
     [self removeObserver:self forKeyPath:SPFavoriteSSHKeyLocationEnabledKey];
     [self removeObserver:self forKeyPath:SPFavoriteSSHKeyLocationKey];
+    [self removeObserver:self forKeyPath:SPFavoriteSSHRemoteSocketPathKey];
     [self removeObserver:self forKeyPath:SPFavoriteSSLKeyFileLocationEnabledKey];
     [self removeObserver:self forKeyPath:SPFavoriteSSLKeyFileLocationKey];
     [self removeObserver:self forKeyPath:SPFavoriteSSLCertificateFileLocationEnabledKey];

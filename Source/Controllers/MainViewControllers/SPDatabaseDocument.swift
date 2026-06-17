@@ -8,6 +8,49 @@
 
 import AppKit
 
+// MARK: - SADatabaseDocumentProviding
+
+// SPDatabaseDocument conforms to SADatabaseDocumentProviding.
+// All requirements are satisfied by the ObjC declarations in SPDatabaseDocument.h.
+// If a requirement is not visible to Swift, we add an explicit forwarding stub below.
+// isProcessing property requirement is satisfied by the ObjC @property (readwrite) BOOL isProcessing.
+extension SPDatabaseDocument: SADatabaseDocumentProviding {}
+
+// MARK: - SATaskManaging
+
+// SPDatabaseDocument conforms to SATaskManaging.
+// All methods are implemented in SPDatabaseDocument.m.
+// The ObjC method names map directly to the protocol requirements:
+//   startTask(withDescription:) -> startTaskWithDescription:
+//   endTask -> endTask
+//   setTaskPercentage(_:) -> setTaskPercentage:
+//   setTaskProgressToIndeterminate(afterDelay:) -> setTaskProgressToIndeterminateAfterDelay:
+//   enableTaskCancellation(withTitle:callbackObject:callbackFunction:) -> enableTaskCancellationWithTitle:callbackObject:callbackFunction:
+//   disableTaskCancellation -> disableTaskCancellation
+//   isWorking -> isWorking
+//   setDatabaseListIsSelectable(_:) -> setDatabaseListIsSelectable:
+//   setTaskDescription(_:) -> setTaskDescription:
+// The protocol requirements use @objc(...) to bind each Swift method to the
+// exact existing ObjC selector on SPDatabaseDocument (declared in
+// SPDatabaseDocument.h / implemented in SPDatabaseDocument.m), so conformance
+// is satisfied directly by those ObjC methods — no forwarding stub needed.
+//
+// The previous stubs recursed: a Swift method marked @objc with the same
+// selector as the ObjC method it tried to call ends up pointing at itself
+// in the class method table, so `method(for:)` (or a regular Swift call)
+// dispatches straight back into the stub until the stack overflows.
+extension SPDatabaseDocument: SATaskManaging {}
+
+// MARK: - SATaskControllerDelegate
+
+// SPDatabaseDocument hosts the SATaskController extracted in Phase A2.
+// `taskParentWindow` and `taskControllerDidRequestCancellation` are
+// implemented in SPDatabaseDocument.m (they reach into the live MySQL
+// connection and the parent window controller).
+extension SPDatabaseDocument: SATaskControllerDelegate {}
+
+// MARK: - Save Accessory
+
 extension SPDatabaseDocument {
     @objc func prepareSaveAccessoryView(panel: NSSavePanel) {
         guard Bundle.main.loadNibNamed("SaveSPFAccessory", owner: self, topLevelObjects: nil) else {

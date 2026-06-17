@@ -11,7 +11,6 @@
 #import "SPFunctions.h"
 #import "SPAppController.h"
 #import "SPTooltip.h"
-#import "SPBundleHTMLOutputController.h"
 #import "SPBundleCommandRunner.h"
 #import "SPChooseMenuItemDialog.h"
 #import "SPTextView.h"
@@ -446,36 +445,57 @@ static SPBundleManager *sharedManager = nil;
 								if(bundleWasDeleted) continue;
 
 								// If default Bundle is already installed check for possible update,
-								// if so duplicate the modified one by appending (user) and updated it
-								if(doBundleUpdate || [installedBundleUUIDs objectForKey:[cmdData objectForKey:SPBundleFileUUIDKey]] == nil) {
-									NSString *oldBundlePath = [NSString stringWithFormat:@"%@/%@/%@", [bundlePaths objectAtIndex:0], bundle, SPBundleFileName];
-									if([installedBundleUUIDs objectForKey:[cmdData objectForKey:SPBundleFileUUIDKey]] != nil && ![([[installedBundleUUIDs objectForKey:[cmdData objectForKey:SPBundleFileUUIDKey]] objectForKey:@"path"] ?: @"") isEqualToString: @""]) {
-										oldBundlePath = [[installedBundleUUIDs objectForKey:[cmdData objectForKey:SPBundleFileUUIDKey]] objectForKey:@"path"];
-									}
+								// if so duplicate the modified one by appending (user) and updated it.
+								NSString *bundleUUID = [cmdData objectForKey:SPBundleFileUUIDKey];
+								NSDictionary *installedBundleInfo = [installedBundleUUIDs objectForKey:bundleUUID];
+								BOOL needsVersionUpdate = NO;
+								NSString *oldBundlePath = [NSString stringWithFormat:@"%@/%@/%@", [bundlePaths objectAtIndex:0], bundle, SPBundleFileName];
+								NSDictionary *cmdDataOld = nil;
 
-									if([installedBundleUUIDs objectForKey:[cmdData objectForKey:SPBundleFileUUIDKey]]) {
-                                        loadErr = nil;
-                                        NSDictionary *cmdDataOld = [self loadBundleAt:oldBundlePath error:&loadErr];
-                                        if(!cmdDataOld || loadErr) {
-                                            SPLog(@"“%@” file couldn't be read. (error=%@)", oldBundlePath, loadErr.localizedDescription);
-                                        }
+								if(installedBundleInfo != nil && ![([installedBundleInfo objectForKey:@"path"] ?: @"") isEqualToString:@""]) {
+									oldBundlePath = [installedBundleInfo objectForKey:@"path"];
+								}
+
+								if(installedBundleInfo != nil) {
+									loadErr = nil;
+									cmdDataOld = [self loadBundleAt:oldBundlePath error:&loadErr];
+									if(!cmdDataOld || loadErr) {
+										SPLog(@"“%@” file couldn't be read. (error=%@)", oldBundlePath, loadErr.localizedDescription);
+									} else {
+										needsVersionUpdate = [SABundleVersionUpdater shouldUpdateDefaultBundleWithInstalledVersion:[cmdDataOld objectForKey:SPBundleVersionKey]
+																									bundledVersion:[cmdData objectForKey:SPBundleVersionKey]];
+										if(needsVersionUpdate) {
+											SPLog(@"Updating default bundle %@ (%@) because bundled version %@ is newer than installed version %@",
+												[cmdData objectForKey:SPBundleFileNameKey],
+												bundleUUID,
+												([cmdData objectForKey:SPBundleVersionKey] ?: @0),
+												([cmdDataOld objectForKey:SPBundleVersionKey] ?: @0));
+										}
+									}
+								}
+
+								if(doBundleUpdate || installedBundleInfo == nil || needsVersionUpdate) {
+									if(installedBundleInfo != nil) {
+										if(cmdDataOld == nil) {
+											loadErr = nil;
+											cmdDataOld = [self loadBundleAt:oldBundlePath error:&loadErr];
+											if(!cmdDataOld || loadErr) {
+												SPLog(@"“%@” file couldn't be read. (error=%@)", oldBundlePath, loadErr.localizedDescription);
+											}
+										}
 
 										NSString *oldBundle = [NSString stringWithFormat:@"%@/%@", [bundlePaths objectAtIndex:0], bundle];
+										NSString *installedBundleFolderPath = oldBundlePath.stringByDeletingLastPathComponent;
 										// Check for modifications
 										if(cmdDataOld != nil && [cmdDataOld objectForKey:SPBundleFileDefaultBundleWasModifiedKey]) {
 
 											SPLog(@"default bundle WAS modified, duplicate, change UUID and rename menu item");
 
 											// Duplicate Bundle, change the UUID and rename the menu label
-											NSString *duplicatedBundle = [NSString stringWithFormat:@"%@/%@_%ld.%@", [bundlePaths objectAtIndex:0], [bundle substringToIndex:([bundle length] - [SPUserBundleFileExtensionV2 length] - 1)], (long)(random() % 35000), SPUserBundleFileExtensionV2];
+											NSString *duplicatedBundle = [SABundleVersionUpdater uniqueBundleInstallPathInDirectory:[bundlePaths objectAtIndex:0] bundleName:bundle];
 											NSError *anError = nil;
 
-											NSMutableString *correctedOldBundle = [[NSMutableString alloc] initWithCapacity:oldBundle.length];
-											if([oldBundle hasSuffixWithSuffix:SPUserBundleFileExtensionV2 caseSensitive:YES]){
-												[correctedOldBundle setString:[oldBundle dropSuffixWithSuffix:SPUserBundleFileExtensionV2]];
-												[correctedOldBundle appendString:SPUserBundleFileExtension];
-											}
-											if(![fileManager copyItemAtPath:correctedOldBundle toPath:duplicatedBundle error:&anError]) {
+											if(![fileManager copyItemAtPath:installedBundleFolderPath toPath:duplicatedBundle error:&anError]) {
 												SPLog(@"“%@” file couldn't be copied to update it. (error=%@)", bundle, anError.localizedDescription);
 												NSBeep();
 												continue;
@@ -509,12 +529,12 @@ static SPBundleManager *sharedManager = nil;
 											}
 
 											error = nil;
-											if(![fileManager removeItemAtPath:correctedOldBundle error:&error]) {
-												SPLog(@"“%@” removeItemAtPath. (error=%@)", correctedOldBundle, error.localizedDescription);
-												[fileManager removeItemAtPath:oldBundlePath error:&error];
+											if(![fileManager removeItemAtPath:installedBundleFolderPath error:&error]) {
+												SPLog(@"“%@” removeItemAtPath. (error=%@)", installedBundleFolderPath, error.localizedDescription);
+												[fileManager removeItemAtPath:oldBundle error:&error];
 											}
 											else{
-												SPLog(@"removedItemAtPath: %@\n%@\n", correctedOldBundle, oldBundlePath);
+												SPLog(@"removedItemAtPath: %@\n%@\n", installedBundleFolderPath, oldBundlePath);
 											}
 
 											if(error != nil) {
@@ -539,12 +559,10 @@ static SPBundleManager *sharedManager = nil;
 
 									SPLog(@"copy bundle from app bundle");
 
-									BOOL isDir;
-									NSString *newInfoPath = [NSString stringWithFormat:@"%@/%@/%@", [bundlePaths objectAtIndex:0], bundle, SPBundleFileName];
+									NSString *bundleDestinationPath = [bundlePaths objectAtIndex:0];
 									NSString *orgPath = [NSString stringWithFormat:@"%@/%@", [bundlePaths objectAtIndex:1], bundle];
-									NSString *newPath = [NSString stringWithFormat:@"%@/%@", [bundlePaths objectAtIndex:0], bundle];
-									if([fileManager fileExistsAtPath:newPath isDirectory:&isDir] && isDir)
-										newPath = [NSString stringWithFormat:@"%@_%ld", newPath, (long)(random() % 35000)];
+									NSString *newPath = [SABundleVersionUpdater uniqueBundleInstallPathInDirectory:bundleDestinationPath bundleName:bundle];
+									NSString *newInfoPath = [newPath stringByAppendingPathComponent:SPBundleFileName];
 									error = nil;
 									[fileManager copyItemAtPath:orgPath toPath:newPath error:&error];
 									if(error != nil) {
@@ -907,7 +925,7 @@ static SPBundleManager *sharedManager = nil;
 					else if([action isEqualToString:SPBundleOutputActionShowAsHTML]) {
 						BOOL correspondingWindowFound = NO;
 						for(id win in [NSApp windows]) {
-							if([[win delegate] isKindOfClass:[SPBundleHTMLOutputController class]]) {
+							if([[win delegate] isKindOfClass:[SABundleHTMLOutputWindowController class]]) {
 								if([[[win delegate] windowUUID] isEqualToString:[cmdData objectForKey:SPBundleFileUUIDKey]]) {
 									correspondingWindowFound = YES;
 									[[win delegate] setDocUUID:uuid];
@@ -917,7 +935,7 @@ static SPBundleManager *sharedManager = nil;
 							}
 						}
 						if(!correspondingWindowFound) {
-							SPBundleHTMLOutputController *c = [[SPBundleHTMLOutputController alloc] init];
+							SABundleHTMLOutputWindowController *c = [[SABundleHTMLOutputWindowController alloc] init];
 							[c setWindowUUID:[cmdData objectForKey:SPBundleFileUUIDKey]];
 							[c setDocUUID:uuid];
 							[c displayHTMLContent:output withOptions:nil];
@@ -1099,4 +1117,3 @@ static SPBundleManager *sharedManager = nil;
 }
 
 @end
-

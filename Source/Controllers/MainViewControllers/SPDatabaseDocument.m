@@ -30,6 +30,7 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPDatabaseDocument.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "SPConnectionController.h"
 #import "SPTablesList.h"
 #import "SPDatabaseStructure.h"
@@ -71,7 +72,6 @@
 #import "SPFunctions.h"
 #import "SPCreateDatabaseInfo.h"
 #import "SPAppController.h"
-#import "SPBundleHTMLOutputController.h"
 #import "SPTableTriggers.h"
 #import "SPTableStructure.h"
 #import "SPPrintAccessory.h"
@@ -97,7 +97,7 @@ static NSString *SPNewDatabaseCopyContent = @"SPNewDatabaseCopyContent";
 
 static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 
-@interface SPDatabaseDocument ()
+@interface SPDatabaseDocument () <SADatabaseSelectionDelegate>
 
 // Privately redeclare as read/write to get the synthesized setter
 @property (readwrite, assign) BOOL allowSplitViewResizing;
@@ -140,6 +140,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 @synthesize sqlFileURL;
 @synthesize sqlFileEncoding;
 @synthesize isProcessing;
+@synthesize contentViewSplitter;
 @synthesize serverSupport;
 @synthesize databaseStructureRetrieval;
 @synthesize processID;
@@ -222,16 +223,13 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         spfDocData = [[NSMutableDictionary alloc] init];
         runningActivitiesArray = [[NSMutableArray alloc] init];
 
-        taskProgressWindow = nil;
-        taskDisplayIsIndeterminate = YES;
-        taskDisplayLastValue = 0;
-        taskProgressValue = 0;
-        taskProgressValueDisplayInterval = 1;
-        taskDrawTimer = nil;
-        taskFadeInStartDate = nil;
-        taskCanBeCancelled = NO;
-        taskCancellationCallbackObject = nil;
-        taskCancellationCallbackSelector = NULL;
+        // The task progress UI (window, indicators, timers, cancel button)
+        // lives in SATaskController; we keep the working-level counter and
+        // the surrounding orchestration (notifications, toolbar validation,
+        // database-list selectability) here on the document.
+        taskController = [[SATaskController alloc] init];
+        taskController.delegate = self;
+
         alterDatabaseCharsetHelper = nil; //init in awakeFromNib
         addDatabaseCharsetHelper = nil;
 
@@ -313,23 +311,8 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     NSNib *nibLoader = [[NSNib alloc] initWithNibNamed:@"ConnectionErrorDialog" bundle:[NSBundle mainBundle]];
     [nibLoader instantiateWithOwner:self topLevelObjects:&connectionDialogTopLevelObjects];
 
-    NSArray *progressIndicatorLayerTopLevelObjects = nil;
-    nibLoader = [[NSNib alloc] initWithNibNamed:@"ProgressIndicatorLayer" bundle:[NSBundle mainBundle]];
-    [nibLoader instantiateWithOwner:self topLevelObjects:&progressIndicatorLayerTopLevelObjects];
-
-    // Set up the progress indicator child window and layer - change indicator color and size
-    [taskProgressIndicator setForeColor:[NSColor whiteColor]];
-    NSShadow *progressIndicatorShadow = [[NSShadow alloc] init];
-    [progressIndicatorShadow setShadowOffset:NSMakeSize(1.0f, -1.0f)];
-    [progressIndicatorShadow setShadowBlurRadius:1.0f];
-    [progressIndicatorShadow setShadowColor:[NSColor colorWithCalibratedWhite:0.0f alpha:0.75f]];
-    [taskProgressIndicator setShadow:progressIndicatorShadow];
-    taskProgressWindow = [[NSWindow alloc] initWithContentRect:[taskProgressLayer bounds] styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
-    [taskProgressWindow setReleasedWhenClosed:NO];
-    [taskProgressWindow setOpaque:NO];
-    [taskProgressWindow setBackgroundColor:[NSColor clearColor]];
-    [taskProgressWindow setAlphaValue:0.0f];
-    [taskProgressWindow setContentView:taskProgressLayer];
+    // The task progress window, indicator and layer are loaded and configured
+    // by SATaskController (created in -initWithWindowController:).
 
     alterDatabaseCharsetHelper = [[SPCharsetCollationHelper alloc] initWithCharsetButton:databaseAlterEncodingButton CollationButton:databaseAlterCollationButton];
     addDatabaseCharsetHelper   = [[SPCharsetCollationHelper alloc] initWithCharsetButton:databaseEncodingButton CollationButton:databaseCollationButton];
@@ -339,7 +322,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     [self.parentWindowControllerWindow setRepresentedURL:(spfFileURL && [spfFileURL isFileURL] ? spfFileURL : nil)];
 
     // Add the progress window to this window
-    [self centerTaskWindow];
+    [taskController centerInParentWindow];
 
     // If not connected, update the favorite selection
     if (!_isConnected) {
@@ -595,58 +578,29 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
  *
  * This method *MUST* be called from the UI thread!
  */
+- (IBAction)setDatabases:(id)sender {
+    [self setDatabases];
+}
+
 - (void)setDatabases {
     if (!chooseDatabaseButton) {
         return;
     }
 
-    [chooseDatabaseButton removeAllItems];
-
-    [chooseDatabaseButton addItemWithTitle:NSLocalizedString(@"Choose Database...", @"menu item for choose db")];
-    [[chooseDatabaseButton menu] addItem:[NSMenuItem separatorItem]];
-    [[chooseDatabaseButton menu] addItemWithTitle:NSLocalizedString(@"Add Database...", @"menu item to add db") action:@selector(addDatabase:) keyEquivalent:@""];
-    [[chooseDatabaseButton menu] addItemWithTitle:NSLocalizedString(@"Refresh Databases", @"menu item to refresh databases") action:@selector(setDatabases:) keyEquivalent:@""];
-    [[chooseDatabaseButton menu] addItem:[NSMenuItem separatorItem]];
-
-
     NSArray *theDatabaseList = [mySQLConnection databases];
 
-    allDatabases = [[NSMutableArray alloc] initWithCapacity:[theDatabaseList count]];
-    allSystemDatabases = [[NSMutableArray alloc] initWithCapacity:2];
+    SADatabasePartition *partition = [SADatabaseListManager configurePopup:chooseDatabaseButton
+                                                                 databases:theDatabaseList ?: @[]
+                                                           currentDatabase:[self database]
+                                                       addDatabaseSelector:@selector(addDatabase:)
+                                                  refreshDatabasesSelector:@selector(setDatabases:)];
 
-    for (NSString *databaseName in theDatabaseList)
-    {
-        // If the database is either information_schema or mysql then it is classed as a
-        // system database; similarly, performance_schema in 5.5.3+ and sys in 5.7.7+
-        if ([databaseName isEqualToString:SPMySQLDatabase] ||
-            [databaseName isEqualToString:SPMySQLInformationSchemaDatabase] ||
-            [databaseName isEqualToString:SPMySQLPerformanceSchemaDatabase] ||
-            [databaseName isEqualToString:SPMySQLSysDatabase]) {
-            [allSystemDatabases addObject:databaseName];
-        }
-        else {
-            [allDatabases addObject:databaseName];
-        }
-    }
-
-    // Add system databases
-    for (NSString *database in allSystemDatabases)
-    {
-        [chooseDatabaseButton safeAddItemWithTitle:database];
-    }
-
-    // Add a separator between the system and user databases
-    if ([allSystemDatabases count] > 0) {
-        [[chooseDatabaseButton menu] addItem:[NSMenuItem separatorItem]];
-    }
-
-    // Add user databases
-    for (NSString *database in allDatabases)
-    {
-        [chooseDatabaseButton safeAddItemWithTitle:database];
-    }
-
-    (![self database]) ? [chooseDatabaseButton selectItemAtIndex:0] : [chooseDatabaseButton selectItemWithTitle:[self database]];
+    // Persist the partition: other call sites still read these ivars
+    // directly (add/copy/rename enablement in -controlTextDidChange:,
+    // and the delete path in -_removeDatabase). A later step will
+    // absorb those readers into the manager.
+    allSystemDatabases = [partition.systemDatabases mutableCopy];
+    allDatabases = [partition.userDatabases mutableCopy];
 }
 
 /**
@@ -685,15 +639,8 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 
     // If Navigator runs in syncMode let it follow the selection
     if ([[[SPNavigatorController sharedNavigatorController] onMainThread] syncMode]) {
-        NSMutableString *schemaPath = [NSMutableString string];
-
-        [schemaPath setString:[self connectionID]];
-
-        if([chooseDatabaseButton titleOfSelectedItem] && [[chooseDatabaseButton titleOfSelectedItem] length]) {
-            [schemaPath appendString:SPUniqueSchemaDelimiter];
-            [schemaPath appendString:[chooseDatabaseButton titleOfSelectedItem]];
-        }
-
+        NSString *schemaPath = [SADatabaseListManager navigatorSchemaPathWithConnectionID:[self connectionID]
+                                                                   selectedDatabaseTitle:[chooseDatabaseButton titleOfSelectedItem]];
         [[SPNavigatorController sharedNavigatorController] selectPath:schemaPath];
     }
 
@@ -1143,6 +1090,13 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 #pragma mark -
 #pragma mark Task progress and notification methods
 
+// The task *progress UI* (the borderless window, indicator, description /
+// duration labels, cancel button and the fade-in / query-time timers) lives
+// in SATaskController. The methods below keep the document-wide working-level
+// bookkeeping (`_isWorkingLevel`, task start/end notifications, toolbar
+// validation, database-list selectability) and drive the controller for the
+// presentation.
+
 /**
  * Start a document-wide task, providing a short task description for
  * display to the user.  This sets the document into working mode,
@@ -1162,101 +1116,28 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     // Set the task text. If a nil string was supplied, a generic query notification is occurring -
     // if a task is not already active, use default text.
     if (!description) {
-        if (!_isWorkingLevel) [self setTaskDescription:NSLocalizedString(@"Working...", @"Generic working description")];
+        if (!_isWorkingLevel) [taskController setTaskDescription:NSLocalizedString(@"Working...", @"Generic working description")];
 
         // Otherwise display the supplied string
     } else {
-        [self setTaskDescription:description];
+        [taskController setTaskDescription:description];
     }
 
     // Increment the task level
     _isWorkingLevel++;
 
-    // Reset the progress indicator if necessary
-    if (_isWorkingLevel == 1 || !taskDisplayIsIndeterminate) {
-        taskDisplayIsIndeterminate = YES;
-        [taskProgressIndicator setIndeterminate:YES];
-        [taskProgressIndicator startAnimation:self];
-        taskDisplayLastValue = 0;
-    }
+    BOOL isFirstLevel = (_isWorkingLevel == 1);
+
+    // Reset the progress indicator (and, on the first level, prepare the
+    // cancel button + schedule the appearance/query-time timers).
+    [taskController beginTaskIsFirstLevel:isFirstLevel];
 
     // If the working level just moved to start a task, set up the interface
-    if (_isWorkingLevel == 1) {
-        [taskCancelButton setHidden:YES];
-
+    if (isFirstLevel) {
         // Set flags and prevent further UI interaction in this window
         databaseListIsSelectable = NO;
         [[NSNotificationCenter defaultCenter] postNotificationName:SPDocumentTaskStartNotification object:self];
         [self.mainToolbar validateVisibleItems];
-
-        SPLog(@"Schedule appearance of the task window in the near future, using a frame timer");
-
-        // Schedule appearance of the task window in the near future, using a frame timer.
-        taskFadeInStartDate = [[NSDate alloc] init];
-        queryStartDate = [[NSDate alloc] init];
-        taskDrawTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 30.0 target:self selector:@selector(fadeInTaskProgressWindow:) userInfo:nil repeats:YES];
-        queryExecutionTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(showQueryExecutionTime) userInfo:nil repeats:YES];
-
-    }
-}
-
-/**
- * Show query execution time on progress window.
- */
--(void)showQueryExecutionTime{
-
-    double timeSinceQueryStarted = [[NSDate date] timeIntervalSinceDate:queryStartDate];
-
-    NSString *queryRunningTime = [NSDateComponentsFormatter.hourMinSecFormatter stringFromTimeInterval:timeSinceQueryStarted];
-
-    SPLog(@"showQueryExecutionTime: %@", queryRunningTime);
-
-    NSShadow *textShadow = [[NSShadow alloc] init];
-    [textShadow setShadowColor:[NSColor colorWithCalibratedWhite:0.0f alpha:0.75f]];
-    [textShadow setShadowOffset:NSMakeSize(1.0f, -1.0f)];
-    [textShadow setShadowBlurRadius:3.0f];
-
-    NSMutableDictionary *attributes = [[NSMutableDictionary alloc] initWithObjectsAndKeys:
-                                       [NSFont boldSystemFontOfSize:13.0f], NSFontAttributeName,
-                                       textShadow, NSShadowAttributeName,
-                                       nil];
-    NSAttributedString *queryRunningTimeString = [[NSAttributedString alloc] initWithString:queryRunningTime attributes:attributes];
-
-    [taskDurationTime setAttributedStringValue:queryRunningTimeString];
-
-}
-
-/**
- * Show the task progress window, after a small delay to minimise flicker.
- */
-- (void) fadeInTaskProgressWindow:(NSTimer *)theTimer
-{
-    SPLog(@"fadeInTaskProgressWindow");
-
-    double timeSinceFadeInStart = [[NSDate date] timeIntervalSinceDate:taskFadeInStartDate];
-
-    // Keep the window hidden for the first ~0.5 secs
-    if (timeSinceFadeInStart < 0.5) return;
-
-    if ([taskProgressWindow parentWindow] == nil) {
-        [self.parentWindowControllerWindow addChildWindow:taskProgressWindow ordered:NSWindowAbove];
-    }
-
-    CGFloat alphaValue = [taskProgressWindow alphaValue];
-
-    // If the task progress window is still hidden, center it before revealing it
-    if (alphaValue == 0) [self centerTaskWindow];
-
-    SPLog(@"Fade in the task window over 0.6 seconds");
-
-    // Fade in the task window over 0.6 seconds
-    alphaValue = (float)(timeSinceFadeInStart - 0.5) / 0.6f;
-    if (alphaValue > 1.0f) alphaValue = 1.0f;
-    [taskProgressWindow setAlphaValue:alphaValue];
-
-    // If the window has been fully faded in, clean up the timer.
-    if (alphaValue == 1.0) {
-        [taskDrawTimer invalidate];
     }
 }
 
@@ -1265,18 +1146,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
  */
 - (void) setTaskDescription:(NSString *)description
 {
-    NSShadow *textShadow = [[NSShadow alloc] init];
-    [textShadow setShadowColor:[NSColor colorWithCalibratedWhite:0.0f alpha:0.75f]];
-    [textShadow setShadowOffset:NSMakeSize(1.0f, -1.0f)];
-    [textShadow setShadowBlurRadius:3.0f];
-
-    NSMutableDictionary *attributes = [[NSMutableDictionary alloc] initWithObjectsAndKeys:
-                                       [NSFont boldSystemFontOfSize:13.0f], NSFontAttributeName,
-                                       textShadow, NSShadowAttributeName,
-                                       nil];
-    NSAttributedString *string = [[NSAttributedString alloc] initWithString:description attributes:attributes];
-
-    [taskDescriptionText setAttributedStringValue:string];
+    [taskController setTaskDescription:(description ?: @"")];
 }
 
 /**
@@ -1286,31 +1156,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
  */
 - (void) setTaskPercentage:(CGFloat)taskPercentage
 {
-
-    SPLog(@"setTaskPercentage = %f", taskPercentage);
-
-    // If the task display is currently indeterminate, set it to determinate on the main thread.
-    if (taskDisplayIsIndeterminate) {
-        if (![NSThread isMainThread]) return [[self onMainThread] setTaskPercentage:taskPercentage];
-
-        taskDisplayIsIndeterminate = NO;
-        [taskProgressIndicator stopAnimation:self];
-        [taskProgressIndicator setDoubleValue:0.5];
-    }
-
-    // Check the supplied progress.  Compare it to the display interval - how often
-    // the interface is updated - and update the interface if the value has changed enough.
-    taskProgressValue = taskPercentage;
-    if (taskProgressValue >= taskDisplayLastValue + taskProgressValueDisplayInterval
-        || taskProgressValue <= taskDisplayLastValue - taskProgressValueDisplayInterval)
-    {
-        if ([NSThread isMainThread]) {
-            [taskProgressIndicator setDoubleValue:taskProgressValue];
-        } else {
-            [taskProgressIndicator performSelectorOnMainThread:@selector(setNumberValue:) withObject:[NSNumber numberWithDouble:taskProgressValue] waitUntilDone:NO];
-        }
-        taskDisplayLastValue = taskProgressValue;
-    }
+    [taskController setTaskPercentage:taskPercentage];
 }
 
 /**
@@ -1322,19 +1168,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
  */
 - (void) setTaskProgressToIndeterminateAfterDelay:(BOOL)afterDelay
 {
-    SPLog(@"setTaskProgressToIndeterminateAfterDelay");
-
-    if (afterDelay) {
-        [self performSelector:@selector(setTaskProgressToIndeterminateAfterDelay:) withObject:nil afterDelay:0.5];
-        return;
-    }
-
-    if (taskDisplayIsIndeterminate) return;
-    [NSObject cancelPreviousPerformRequestsWithTarget:taskProgressIndicator];
-    taskDisplayIsIndeterminate = YES;
-    [taskProgressIndicator setIndeterminate:YES];
-    [taskProgressIndicator startAnimation:self];
-    taskDisplayLastValue = 0;
+    [taskController setTaskProgressToIndeterminateAfterDelay:afterDelay];
 }
 
 /**
@@ -1347,13 +1181,9 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     // Ensure a call on the main thread
     if (![NSThread isMainThread]) return [[self onMainThread] endTask];
 
-    SPLog(@"_isWorkingLevel = %li", (long)_isWorkingLevel);
-
     // Decrement the working level
     _isWorkingLevel--;
     assert(_isWorkingLevel >= 0);
-
-    SPLog(@"_isWorkingLevel = %li", (long)_isWorkingLevel);
 
     // Ensure cancellation interface is reset
     [self disableTaskCancellation];
@@ -1363,29 +1193,8 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 
         SPLog(@"!_isWorkingLevel, all tasks have ended");
 
-        // Cancel the draw timer if it exists
-        if (taskDrawTimer) {
-            SPLog(@"Cancel the draw timer if it exists");
-            [taskDrawTimer invalidate];
-        }
-
-        if (queryExecutionTimer) {
-            queryStartDate = [[NSDate alloc] init];
-            SPLog(@"self showQueryExecutionTime");
-            [self showQueryExecutionTime];
-            SPLog(@"queryExecutionTimer invalidate");
-            [queryExecutionTimer invalidate];
-        }
-
-        // Hide the task interface and reset to indeterminate
-        if (taskDisplayIsIndeterminate){
-            SPLog(@"taskDisplayIsIndeterminate,stopAnimation ");
-            [taskProgressIndicator stopAnimation:self];
-        }
-        [taskProgressWindow setAlphaValue:0.0f];
-        [taskProgressWindow orderOut:self];
-        taskDisplayIsIndeterminate = YES;
-        [taskProgressIndicator setIndeterminate:YES];
+        // Hide the task interface, stop the timers and reset to indeterminate
+        [taskController endTaskDisplay];
 
         // Re-enable window interface
         databaseListIsSelectable = YES;
@@ -1399,7 +1208,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
  * Allow a task to be cancelled, enabling the button with a supplied title
  * and optionally supplying a callback object and function.
  */
-- (void) enableTaskCancellationWithTitle:(NSString *)buttonTitle callbackObject:(id)callbackObject callbackFunction:(SEL)callbackFunction
+- (void) enableTaskCancellationWithTitle:(NSString *)buttonTitle callbackObject:(NSObject *)callbackObject callbackFunction:(SEL)callbackFunction
 {
     // Ensure call on the main thread
     if (![NSThread isMainThread]) return [[self onMainThread] enableTaskCancellationWithTitle:buttonTitle callbackObject:callbackObject callbackFunction:callbackFunction];
@@ -1407,19 +1216,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     // If no task is active, return
     if (!_isWorkingLevel) return;
 
-    if (callbackObject && callbackFunction) {
-        taskCancellationCallbackObject = callbackObject;
-        taskCancellationCallbackSelector = callbackFunction;
-    }
-    taskCanBeCancelled = YES;
-
-    NSMutableAttributedString *colorTitle = [[NSMutableAttributedString alloc]
-                                             initWithString:buttonTitle
-                                             attributes:@{NSForegroundColorAttributeName: [NSColor whiteColor]}
-                                             ];
-    [taskCancelButton setAttributedTitle:colorTitle];
-    [taskCancelButton setEnabled:YES];
-    [taskCancelButton setHidden:NO];
+    [taskController enableTaskCancellationWithTitle:buttonTitle callbackObject:callbackObject callbackFunction:callbackFunction];
 }
 
 /**
@@ -1433,32 +1230,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     // If no task is active, return
     if (!_isWorkingLevel) return;
 
-    taskCanBeCancelled = NO;
-    taskCancellationCallbackObject = nil;
-    taskCancellationCallbackSelector = NULL;
-    [taskCancelButton setHidden:YES];
-}
-
-/**
- * Action sent by the cancel button when it's active.
- */
-- (IBAction)cancelTask:(id)sender {
-    if (!taskCanBeCancelled) return;
-
-    [taskCancelButton setEnabled:NO];
-
-    // See whether there is an active database structure task and whether it can be used
-    // to cancel the query, for speed (no connection overhead!)
-    if (databaseStructureRetrieval && [databaseStructureRetrieval connection]) {
-        [mySQLConnection setLastQueryWasCancelled:YES];
-        [[databaseStructureRetrieval connection] killQueryOnThreadID:[mySQLConnection mysqlConnectionThreadId]];
-    } else {
-        [mySQLConnection cancelCurrentQuery];
-    }
-
-    if (taskCancellationCallbackObject && taskCancellationCallbackSelector) {
-        [taskCancellationCallbackObject performSelector:taskCancellationCallbackSelector];
-    }
+    [taskController disableTaskCancellation];
 }
 
 /**
@@ -1479,30 +1251,30 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 }
 
 /**
- * Reposition the task window within the main window.
- */
-- (void)centerTaskWindow
-{
-    NSPoint newBottomLeftPoint;
-    NSRect mainWindowRect = [[self.parentWindowController window] frame];
-    NSRect taskWindowRect = [taskProgressWindow frame];
-
-    newBottomLeftPoint.x = roundf(mainWindowRect.origin.x + mainWindowRect.size.width/2 - taskWindowRect.size.width/2);
-    newBottomLeftPoint.y = roundf(mainWindowRect.origin.y + mainWindowRect.size.height/2 - taskWindowRect.size.height/2);
-
-    [taskProgressWindow setFrameOrigin:newBottomLeftPoint];
-}
-
-/**
  * Support pausing and restarting the task progress indicator.
  * Only works while the indicator is in indeterminate mode.
  */
 - (void)setTaskIndicatorShouldAnimate:(BOOL)shouldAnimate
 {
-    if (shouldAnimate) {
-        [[taskProgressIndicator onMainThread] startAnimation:self];
+    [taskController setTaskIndicatorShouldAnimate:shouldAnimate];
+}
+
+#pragma mark - SATaskControllerDelegate
+
+- (NSWindow *)taskParentWindow
+{
+    return self.parentWindowControllerWindow;
+}
+
+- (void)taskControllerDidRequestCancellation
+{
+    // See whether there is an active database structure task and whether it can be used
+    // to cancel the query, for speed (no connection overhead!)
+    if (databaseStructureRetrieval && [databaseStructureRetrieval connection]) {
+        [mySQLConnection setLastQueryWasCancelled:YES];
+        [[databaseStructureRetrieval connection] killQueryOnThreadID:[mySQLConnection mysqlConnectionThreadId]];
     } else {
-        [[taskProgressIndicator onMainThread] stopAnimation:self];
+        [mySQLConnection cancelCurrentQuery];
     }
 }
 
@@ -2149,7 +1921,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 {
     NSSavePanel *panel = [NSSavePanel savePanel];
 
-    [panel setAllowedFileTypes:@[SPFileExtensionSQL]];
+    [panel setAllowedContentTypes:@[[UTType typeWithFilenameExtension:SPFileExtensionSQL]]];
 
     [panel setExtensionHidden:NO];
     [panel setAllowsOtherFileTypes:YES];
@@ -2465,6 +2237,14 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
                     [connectionController host] ? [connectionController host] : @"",
                     port];
             break;
+        case SPAWSIAMConnection:
+            return [NSString stringWithFormat:@"%@@%@%@&AWSIAM&%@&%@",
+                    ([connectionController user] && [[connectionController user] length]) ? [connectionController user] : @"anonymous",
+                    [connectionController host] ? [connectionController host] : @"",
+                    port,
+                    ([[connectionController awsProfile] length]) ? [connectionController awsProfile] : @"default",
+                    ([[connectionController awsRegion] length]) ? [connectionController awsRegion] : @"auto"];
+            break;
         case SPSSHTunnelConnection:
             return [NSString stringWithFormat:@"%@@%@%@&SSH&%@@%@:%@",
                     ([connectionController user] && [[connectionController user] length]) ? [connectionController user] : @"anonymous",
@@ -2472,6 +2252,15 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
                     ([connectionController sshUser] && [[connectionController sshUser] length]) ? [connectionController sshUser] : @"anonymous",
                     [connectionController sshHost] ? [connectionController sshHost] : @"",
                     ([[connectionController sshPort] length]) ? [connectionController sshPort] : @"22"];
+        case SPVaultConnection:
+            return [NSString stringWithFormat:@"%@@%@%@&Vault:%@:%@:%@/%@",
+                    ([connectionController user] && [[connectionController user] length]) ? [connectionController user] : @"anonymous",
+                    [connectionController host] ? [connectionController host] : @"",
+                    port,
+                    [connectionController vaultHost] ? [connectionController vaultHost] : @"",
+                    ([[connectionController vaultPort] length]) ? [connectionController vaultPort] : @"443",
+                    [connectionController vaultOIDCMount] ? [connectionController vaultOIDCMount] : @"",
+                    [connectionController vaultCredentialsPath] ? [connectionController vaultCredentialsPath] : @""];
     }
 
     return @"_";
@@ -2689,7 +2478,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
                                                         includeDefaultEntry:NO
                                                               encodingPopUp:&encodingPopUp]];
 
-        [panel setAllowedFileTypes:@[SPFileExtensionSQL]];
+        [panel setAllowedContentTypes:@[[UTType typeWithFilenameExtension:SPFileExtensionSQL]]];
 
         if (![prefs stringForKey:@"lastSqlFileName"]) {
             [prefs setObject:@"" forKey:@"lastSqlFileName"];
@@ -2716,7 +2505,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         }
 
         // Save current session (open connection windows as SPF file)
-        [panel setAllowedFileTypes:@[SPFileExtensionDefault]];
+        [panel setAllowedContentTypes:@[[UTType typeWithFilenameExtension:SPFileExtensionDefault]]];
 
         [self prepareSaveAccessoryViewWithPanel:panel];
 
@@ -2738,7 +2527,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     else if (sender == nil || [sender tag] == SPMainMenuFileSaveSession) {
 
         // Save current session (open connection windows as SPFS file)
-        [panel setAllowedFileTypes:@[SPBundleFileExtension]];
+        [panel setAllowedContentTypes:@[[UTType typeWithFilenameExtension:SPBundleFileExtension]]];
 
         [self prepareSaveAccessoryViewWithPanel:panel];
 
@@ -2809,6 +2598,10 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             if (error != nil) {
                 NSAlert *errorAlert = [NSAlert alertWithError:error];
                 [errorAlert runModal];
+            } else {
+                // Remember this tab's file so Cmd-S writes back here
+                [self setSqlFileURL:[NSURL fileURLWithPath:fileName]];
+                [self setSqlFileEncoding:[[encodingPopUp selectedItem] tag]];
             }
             [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:fileName]];
 
@@ -3357,6 +3150,11 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 
 /**
  * Update the window title.
+ *
+ * The actual string composition lives in SAWindowTitleBuilder (Swift) —
+ * this method gathers the document's current state and forwards the
+ * result to the window controller. The accessory-color update only
+ * applies in the connected branch.
  */
 - (void)updateWindowTitle:(id)sender {
     // Ensure a call on the main thread
@@ -3364,47 +3162,29 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         return [[self onMainThread] updateWindowTitle:sender];
     }
 
-    // Determine name details
-    NSString *pathName = @"";
-    if ([[[self fileURL] path] length] && ![self isUntitled]) {
-        pathName = [NSString stringWithFormat:@"%@ — ", [[[self fileURL] path] lastPathComponent]];
+    SAWindowConnectionState state;
+    if ([connectionController isConnecting]) {
+        state = SAWindowConnectionStateConnecting;
+    } else if (!_isConnected) {
+        state = SAWindowConnectionStateDisconnected;
+    } else {
+        state = SAWindowConnectionStateConnected;
     }
 
-    if ([connectionController isConnecting]) {
-        NSString *title = NSLocalizedString(@"Connecting…", @"window title string indicating that sp is connecting");
-        [self.parentWindowController updateWindowWithTitle:title tabTitle:title];
-    } else if (!_isConnected) {
-        NSString *title = [NSString stringWithFormat:@"%@%@", pathName, [[[NSBundle mainBundle] infoDictionary] objectForKey:(NSString*)kCFBundleNameKey]];
-        [self.parentWindowController updateWindowWithTitle:title tabTitle:title];
-    } else {
-        NSMutableString *windowTitle = [NSMutableString string];
+    SAWindowTitleResult *result = [SAWindowTitleBuilder
+        buildTitleWithConnectionState:state
+                             filePath:[[self fileURL] path]
+                           isUntitled:[self isUntitled]
+                           bundleName:[[[NSBundle mainBundle] infoDictionary] objectForKey:(NSString *)kCFBundleNameKey]
+                       connectionName:[self name]
+                             database:[self database]
+                                table:[self table]
+                         mySQLVersion:mySQLVersion
+             showServerVersionInTitle:[prefs boolForKey:SPDisplayServerVersionInWindowTitle]];
 
-        // Add the path to the window title
-        [windowTitle appendString:pathName];
+    [self.parentWindowController updateWindowWithTitle:result.windowTitle tabTitle:result.tabTitle];
 
-        // Add the MySQL version to the window title if enabled in prefs
-        if ([prefs boolForKey:SPDisplayServerVersionInWindowTitle]) {
-            [windowTitle appendFormat:@"(MySQL %@) ", mySQLVersion];
-        }
-
-        NSMutableString *tabTitle = [NSMutableString string];
-
-        // Add the name to the window
-        [windowTitle appendString:[self name]];
-        [tabTitle appendString:[self name]];
-
-        // If a database is selected, add to the window - and other tabs if host is the same but db different or table is not set
-        if ([self database]) {
-            [windowTitle appendFormat:@"/%@", [self database]];
-            [tabTitle appendFormat:@"/%@", [self database]];
-        }
-
-        // Add the table name if one is selected
-        if ([[self table] length]) {
-            [windowTitle appendFormat:@"/%@", [self table]];
-            [tabTitle appendFormat:@"/%@", [self table]];
-        }
-        [self.parentWindowController updateWindowWithTitle:windowTitle tabTitle:tabTitle];
+    if (state == SAWindowConnectionStateConnected) {
         [self.parentWindowController updateWindowAccessoryWithColor:[[SPFavoriteColorSupport sharedInstance] colorForIndex:[connectionController colorIndex]] isSSL:[self.connectionController isConnectedViaSSL]];
     }
 }
@@ -3473,89 +3253,14 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         [toolbarItem setTarget:self];
         [toolbarItem setAction:@selector(clearConsole:)];
 
-    } else if ([itemIdentifier isEqualToString:SPMainToolbarTableStructure]) {
-        [toolbarItem setLabel:NSLocalizedString(@"Structure", @"toolbar item label for switching to the Table Structure tab")];
-        [toolbarItem setPaletteLabel:NSLocalizedString(@"Edit Table Structure", @"toolbar item label for switching to the Table Structure tab")];
-        //set up tooltip and image
-        [toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Structure tab", @"tooltip for toolbar item for switching to the Table Structure tab")];
-        if (@available(macOS 11.0, *)) {
-            [toolbarItem setImage:[NSImage imageWithSystemSymbolName:@"scale.3d" accessibilityDescription:nil]];
-        } else {
-            [toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-structure"]];
+    } else if ([[SAViewModeHelper allToolbarIdentifiers] containsObject:itemIdentifier]) {
+        // Use data-driven SAViewMode for view-switching toolbar items
+        for (NSInteger i = 0; i <= SAViewModeTriggers; i++) {
+            NSToolbarItem *modeItem = [SAViewModeHelper makeToolbarItemFor:(SAViewMode)i target:self];
+            if ([modeItem.itemIdentifier isEqualToString:itemIdentifier]) {
+                return modeItem;
+            }
         }
-        //set up the target action
-        [toolbarItem setTarget:self];
-        [toolbarItem setAction:@selector(viewStructure)];
-
-    } else if ([itemIdentifier isEqualToString:SPMainToolbarTableContent]) {
-        [toolbarItem setLabel:NSLocalizedString(@"Content", @"toolbar item label for switching to the Table Content tab")];
-        [toolbarItem setPaletteLabel:NSLocalizedString(@"Browse & Edit Table Content", @"toolbar item label for switching to the Table Content tab")];
-        //set up tooltip and image
-        [toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Content tab", @"tooltip for toolbar item for switching to the Table Content tab")];
-        if (@available(macOS 11.0, *)) {
-            [toolbarItem setImage:[NSImage imageWithSystemSymbolName:@"text.justify" accessibilityDescription:nil]];
-        } else {
-            [toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-browse"]];
-        }
-        //set up the target action
-        [toolbarItem setTarget:self];
-        [toolbarItem setAction:@selector(viewContent)];
-
-    } else if ([itemIdentifier isEqualToString:SPMainToolbarCustomQuery]) {
-        [toolbarItem setLabel:NSLocalizedString(@"Query", @"toolbar item label for switching to the Run Query tab")];
-        [toolbarItem setPaletteLabel:NSLocalizedString(@"Run Custom Query", @"toolbar item label for switching to the Run Query tab")];
-        //set up tooltip and image
-        [toolbarItem setToolTip:NSLocalizedString(@"Switch to the Run Query tab", @"tooltip for toolbar item for switching to the Run Query tab")];
-        if (@available(macOS 11.0, *)) {
-            [toolbarItem setImage:[NSImage imageWithSystemSymbolName:@"terminal" accessibilityDescription:nil]];
-        } else {
-            [toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-sql"]];
-        }
-        //set up the target action
-        [toolbarItem setTarget:self];
-        [toolbarItem setAction:@selector(viewQuery)];
-
-    } else if ([itemIdentifier isEqualToString:SPMainToolbarTableInfo]) {
-        [toolbarItem setLabel:NSLocalizedString(@"Table Info", @"toolbar item label for switching to the Table Info tab")];
-        [toolbarItem setPaletteLabel:NSLocalizedString(@"Table Info", @"toolbar item label for switching to the Table Info tab")];
-        //set up tooltip and image
-        [toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Info tab", @"tooltip for toolbar item for switching to the Table Info tab")];
-        if (@available(macOS 11.0, *)) {
-            [toolbarItem setImage:[NSImage imageWithSystemSymbolName:@"info.circle" accessibilityDescription:nil]];
-        } else {
-            [toolbarItem setImage:[NSImage imageNamed:NSImageNameInfo]];
-        }
-        //set up the target action
-        [toolbarItem setTarget:self];
-        [toolbarItem setAction:@selector(viewStatus)];
-
-    } else if ([itemIdentifier isEqualToString:SPMainToolbarTableRelations]) {
-        [toolbarItem setLabel:NSLocalizedString(@"Relations", @"toolbar item label for switching to the Table Relations tab")];
-        [toolbarItem setPaletteLabel:NSLocalizedString(@"Table Relations", @"toolbar item label for switching to the Table Relations tab")];
-        //set up tooltip and image
-        [toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Relations tab", @"tooltip for toolbar item for switching to the Table Relations tab")];
-        if (@available(macOS 11.0, *)) {
-            [toolbarItem setImage:[NSImage imageWithSystemSymbolName:@"arrow.2.squarepath" accessibilityDescription:nil]];
-        } else {
-            [toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-table-relations"]];
-        }
-        //set up the target action
-        [toolbarItem setTarget:self];
-        [toolbarItem setAction:@selector(viewRelations)];
-
-    } else if ([itemIdentifier isEqualToString:SPMainToolbarTableTriggers]) {
-        [toolbarItem setLabel:NSLocalizedString(@"Triggers", @"toolbar item label for switching to the Table Triggers tab")];
-        [toolbarItem setPaletteLabel:NSLocalizedString(@"Table Triggers", @"toolbar item label for switching to the Table Triggers tab")];
-        //set up tooltip and image
-        [toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Triggers tab", @"tooltip for toolbar item for switching to the Table Triggers tab")];
-        if (@available(macOS 11.0, *)) {
-            [toolbarItem setImage:[NSImage imageWithSystemSymbolName:@"bolt.circle" accessibilityDescription:nil]];
-        } else {
-            [toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-table-triggers"]];
-        }
-        //set up the target action
-        [toolbarItem setTarget:self];
-        [toolbarItem setAction:@selector(viewTriggers)];
 
     } else if ([itemIdentifier isEqualToString:SPMainToolbarUserManager]) {
         [toolbarItem setLabel:NSLocalizedString(@"Users", @"toolbar item label for switching to the User Manager tab")];
@@ -3809,14 +3514,15 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 }
 
 /**
- * The window title for this document.
+ * The window title for this document. Mirrors the disconnected-state
+ * preamble of -updateWindowTitle:; both share SAWindowTitleBuilder.
  */
 - (NSString *)displayName
 {
-    if (!_isConnected) {
-        return [NSString stringWithFormat:@"%@%@", ([[[self fileURL] path] length] && ![self isUntitled]) ? [NSString stringWithFormat:@"%@ — ",[[[self fileURL] path] lastPathComponent]] : @"", [[[NSBundle mainBundle] infoDictionary] objectForKey:(NSString*)kCFBundleNameKey]];
-    }
-    return [[[self fileURL] path] lastPathComponent];
+    return [SAWindowTitleBuilder displayNameWithIsConnected:_isConnected
+                                                   filePath:[[self fileURL] path]
+                                                 isUntitled:[self isUntitled]
+                                                 bundleName:[[[NSBundle mainBundle] infoDictionary] objectForKey:(NSString *)kCFBundleNameKey]];
 }
 
 - (NSUndoManager *)undoManager
@@ -3860,6 +3566,11 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             case SPTCPIPConnection:
                 connectionType = @"SPTCPIPConnection";
                 break;
+            case SPAWSIAMConnection:
+                connectionType = @"SPAWSIAMConnection";
+                if ([[connectionController awsProfile] length]) [connection setObject:[connectionController awsProfile] forKey:@"aws_profile"];
+                if ([[connectionController awsRegion] length]) [connection setObject:[connectionController awsRegion] forKey:@"aws_region"];
+                break;
             case SPSocketConnection:
                 connectionType = @"SPSocketConnection";
                 if ([connectionController socket] && [[connectionController socket] length]) [connection setObject:[connectionController socket] forKey:@"socket"];
@@ -3871,6 +3582,14 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
                 [connection setObject:[NSNumber numberWithInteger:[connectionController sshKeyLocationEnabled]] forKey:@"ssh_keyLocationEnabled"];
                 if ([connectionController sshKeyLocation]) [connection setObject:[connectionController sshKeyLocation] forKey:@"ssh_keyLocation"];
                 if ([connectionController sshPort] && [[connectionController sshPort] length]) [connection setObject:[NSNumber numberWithInteger:[[connectionController sshPort] integerValue]] forKey:@"ssh_port"];
+                if ([connectionController sshRemoteSocketPath] && [[connectionController sshRemoteSocketPath] length]) [connection setObject:[connectionController sshRemoteSocketPath] forKey:@"sshRemoteSocketPath"];
+                break;
+            case SPVaultConnection:
+                connectionType = @"SPVaultConnection";
+                if ([[connectionController vaultHost] length]) [connection setObject:[connectionController vaultHost] forKey:@"vault_host"];
+                if ([[connectionController vaultPort] length]) [connection setObject:[connectionController vaultPort] forKey:@"vault_port"];
+                if ([[connectionController vaultOIDCMount] length]) [connection setObject:[connectionController vaultOIDCMount] forKey:@"vault_oidc_mount"];
+                if ([[connectionController vaultCredentialsPath] length]) [connection setObject:[connectionController vaultCredentialsPath] forKey:@"vault_credentials_path"];
                 break;
             default:
                 connectionType = @"SPTCPIPConnection";
@@ -3886,7 +3605,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         if([connectionController port] && [[connectionController port] length]) [connection setObject:[NSNumber numberWithInteger:[[connectionController port] integerValue]] forKey:@"port"];
         if([[self database] length])                                            [connection setObject:[self database] forKey:@"database"];
 
-        if (includePasswords) {
+        if (includePasswords && [connectionController type] != SPVaultConnection) {
             NSString *pw = [connectionController keychainPassword];
             if (!pw) pw = [connectionController password];
             if (pw) [connection setObject:pw forKey:@"password"];
@@ -4031,11 +3750,14 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     NSString *typeString = [connection objectForKey:@"type"];
     if (typeString) {
         if ([typeString isEqualToString:@"SPTCPIPConnection"])          connectionType = SPTCPIPConnection;
+        else if ([typeString isEqualToString:@"SPAWSIAMConnection"])    connectionType = SPAWSIAMConnection;
         else if ([typeString isEqualToString:@"SPSocketConnection"])    connectionType = SPSocketConnection;
         else if ([typeString isEqualToString:@"SPSSHTunnelConnection"]) connectionType = SPSSHTunnelConnection;
+        else if ([typeString isEqualToString:@"SPVaultConnection"])     connectionType = SPVaultConnection;
         else                                                            connectionType = SPTCPIPConnection;
 
         [connectionController setType:connectionType];
+        [connectionController setUseAWSIAMAuth:(connectionType == SPAWSIAMConnection ? NSControlStateValueOn : NSControlStateValueOff)];
         [connectionController resizeTabViewToConnectionType:connectionType animating:NO];
     }
 
@@ -4045,6 +3767,8 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     if ([connection objectForKey:@"host"])                 [connectionController setHost:[connection objectForKey:@"host"]];
     if ([connection objectForKey:@"port"])                 [connectionController setPort:[NSString stringWithFormat:@"%ld", (long)[[connection objectForKey:@"port"] integerValue]]];
     if ([connection objectForKey:SPFavoriteColorIndexKey]) [connectionController setColorIndex:[(NSNumber *)[connection objectForKey:SPFavoriteColorIndexKey] integerValue]];
+    if ([connection objectForKey:@"aws_profile"])          [connectionController setAwsProfile:[connection objectForKey:@"aws_profile"]];
+    if ([connection objectForKey:@"aws_region"])           [connectionController setAwsRegion:[connection objectForKey:@"aws_region"]];
 
 
     //Set special connection settings
@@ -4087,6 +3811,13 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
     if ([connection objectForKey:@"ssh_keyLocationEnabled"]) [connectionController setSshKeyLocationEnabled:[[connection objectForKey:@"ssh_keyLocationEnabled"] intValue]];
     if ([connection objectForKey:@"ssh_keyLocation"])        [connectionController setSshKeyLocation:[connection objectForKey:@"ssh_keyLocation"]];
     if ([connection objectForKey:@"ssh_port"])               [connectionController setSshPort:[NSString stringWithFormat:@"%ld", (long)[[connection objectForKey:@"ssh_port"] integerValue]]];
+    if ([connection objectForKey:@"sshRemoteSocketPath"])    [connectionController setSshRemoteSocketPath:[connection objectForKey:@"sshRemoteSocketPath"]];
+
+    // Set Vault details if available
+    if ([connection objectForKey:@"vault_host"])             [connectionController setVaultHost:[connection objectForKey:@"vault_host"]];
+    if ([connection objectForKey:@"vault_port"])             [connectionController setVaultPort:[connection objectForKey:@"vault_port"]];
+    if ([connection objectForKey:@"vault_oidc_mount"])       [connectionController setVaultOIDCMount:[connection objectForKey:@"vault_oidc_mount"]];
+    if ([connection objectForKey:@"vault_credentials_path"]) [connectionController setVaultCredentialsPath:[connection objectForKey:@"vault_credentials_path"]];
 
     // Set the SSH password - if not in SPF file try to get it via the KeyChain
     if ([connection objectForKey:@"ssh_password"]) {
@@ -5355,85 +5086,137 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 
 /**
  * Select the specified database and, optionally, table.
+ *
+ * Trampoline into SADatabaseListManager. The orchestration
+ * (history-state save, popup-rebuild-and-retry, focus restoration)
+ * lives in Swift via `SADatabaseSelectionDelegate`; the delegate
+ * implementation is in the SADatabaseSelectionDelegate section below.
  */
 - (void)_selectDatabaseAndItem:(NSDictionary *)selectionDetails
 {
     @autoreleasepool {
-        NSString *targetDatabaseName = [selectionDetails objectForKey:@"database"];
-        NSString *targetItemName = [selectionDetails objectForKey:@"item"];
-
-        // Save existing scroll position and details, and ensure no duplicate entries are created as table list changes
-        BOOL historyStateChanging = [spHistoryControllerInstance modifyingState];
-
-        if (!historyStateChanging) {
-            [spHistoryControllerInstance updateHistoryEntries];
-            [spHistoryControllerInstance setModifyingState:YES];
-        }
-
-        if (![targetDatabaseName isEqualToString:selectedDatabase]) {
-            // Attempt to select the specified database, and abort on failure
-            if ([[chooseDatabaseButton onMainThread] indexOfItemWithTitle:targetDatabaseName] == NSNotFound || ![mySQLConnection selectDatabase:targetDatabaseName])
-            {
-                // End the task first to ensure the database dropdown can be reselected
-                [self endTask];
-
-                if ([mySQLConnection isConnected]) {
-
-                    // Update the database list
-                    [[self onMainThread] setDatabases];
-
-                    [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Error", @"error") message:[NSString stringWithFormat:NSLocalizedString(@"Unable to select database %@.\nPlease check you have the necessary privileges to view the database, and that the database still exists.", @"message of panel when connection to db failed after selecting from popupbutton"), targetDatabaseName] callback:nil];
-                }
-
-                return;
-            }
-
-            [[chooseDatabaseButton onMainThread] selectItemWithTitle:targetDatabaseName];
-
-            selectedDatabase = [[NSString alloc] initWithString:targetDatabaseName];
-            selectedTableName = nil;
-
-            [databaseDataInstance resetAllData];
-
-            // Update the stored database encoding, used for views, "default" table encodings, and to allow
-            // or disallow use of the "View using encoding" menu
-            [self detectDatabaseEncoding];
-
-            // Set the connection of SPTablesList to reload tables in db
-            [tablesListInstance setConnection:mySQLConnection];
-
-            // Update the window title
-            [self updateWindowTitle:self];
-
-            // Add a history entry
-            if (!historyStateChanging) {
-                [spHistoryControllerInstance setModifyingState:NO];
-                [spHistoryControllerInstance updateHistoryEntries];
-            }
-        }
-
-        SPMainQSync(^{
-            BOOL focusOnFilter = YES;
-            if (targetItemName) focusOnFilter = NO;
-
-            // If a the table has changed, update the selection
-            if (![targetItemName isEqualToString:[self table]] && targetItemName) {
-                focusOnFilter = ![self->tablesListInstance selectItemWithName:targetItemName];
-            }
-
-            // Ensure the window focus is on the table list or the filter as appropriate
-            [self->tablesListInstance setTableListSelectability:YES];
-            if (focusOnFilter) {
-                [self->tablesListInstance makeTableListFilterHaveFocus];
-            } else {
-                [self->tablesListInstance makeTableListHaveFocus];
-            }
-            [self->tablesListInstance setTableListSelectability:NO];
-        });
-
-        [self endTask];
-        [self _processDatabaseChangedBundleTriggerActions];
+        [SADatabaseListManager performSelectionWithDatabase:[selectionDetails objectForKey:@"database"]
+                                                       item:[selectionDetails objectForKey:@"item"]
+                                                   delegate:self];
     }
+}
+
+#pragma mark - SADatabaseSelectionDelegate
+
+- (NSString *)currentSelectedDatabase
+{
+    return selectedDatabase;
+}
+
+- (void)setCurrentSelectedDatabase:(NSString *)value
+{
+    // Match original semantics: -_selectDatabaseAndItem: built a fresh
+    // immutable copy via [[NSString alloc] initWithString:…] when it
+    // assigned to the ivar. -copy on an NSString returns self for the
+    // already-immutable case, but stays correct for any mutable input.
+    selectedDatabase = [value copy];
+}
+
+- (NSString *)currentSelectedTable
+{
+    return selectedTableName;
+}
+
+- (void)setCurrentSelectedTable:(NSString *)value
+{
+    selectedTableName = [value copy];
+}
+
+- (BOOL)historyStateIsModifying
+{
+    return [spHistoryControllerInstance modifyingState];
+}
+
+- (void)setHistoryStateIsModifying:(BOOL)value
+{
+    [spHistoryControllerInstance setModifyingState:value];
+}
+
+- (BOOL)isDatabaseConnected
+{
+    return [mySQLConnection isConnected];
+}
+
+- (NSString *)currentTableName
+{
+    return [self table];
+}
+
+- (NSPopUpButton *)chooseDatabaseButton
+{
+    return chooseDatabaseButton;
+}
+
+- (BOOL)selectMySQLDatabase:(NSString *)name
+{
+    return [mySQLConnection selectDatabase:name];
+}
+
+- (void)updateHistoryEntries
+{
+    [spHistoryControllerInstance updateHistoryEntries];
+}
+
+- (void)rebuildDatabasesPopup
+{
+    [self setDatabases];
+}
+
+- (void)endLoadingTask
+{
+    [self endTask];
+}
+
+- (void)resetDatabaseData
+{
+    [databaseDataInstance resetAllData];
+}
+
+- (void)reattachTablesListConnection
+{
+    [tablesListInstance setConnection:mySQLConnection];
+}
+
+- (void)refreshWindowTitle
+{
+    [self updateWindowTitle:self];
+}
+
+- (void)presentUnableToSelectDatabaseAlertWithName:(NSString *)name
+{
+    [NSAlert createWarningAlertWithTitle:NSLocalizedString(@"Error", @"error")
+                                 message:[NSString stringWithFormat:NSLocalizedString(@"Unable to select database %@.\nPlease check you have the necessary privileges to view the database, and that the database still exists.", @"message of panel when connection to db failed after selecting from popupbutton"), name]
+                                callback:nil];
+}
+
+- (BOOL)selectTablesListItemWithNamed:(NSString *)name
+{
+    return [tablesListInstance selectItemWithName:name];
+}
+
+- (void)setTableListSelectability:(BOOL)flag
+{
+    [tablesListInstance setTableListSelectability:flag];
+}
+
+- (void)focusTableListFilter
+{
+    [tablesListInstance makeTableListFilterHaveFocus];
+}
+
+- (void)focusTableList
+{
+    [tablesListInstance makeTableListHaveFocus];
+}
+
+- (void)processDatabaseChangedBundleTriggers
+{
+    [self _processDatabaseChangedBundleTriggerActions];
 }
 
 - (void)_processDatabaseChangedBundleTriggerActions
@@ -5462,7 +5245,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 
             for (id win in [NSApp windows])
             {
-                if([[[[win delegate] class] description] isEqualToString:@"SPBundleHTMLOutputController"]) {
+                if([[[[win delegate] class] description] isEqualToString:@"SABundleHTMLOutputWindowController"]) {
                     if([[[win delegate] windowUUID] isEqualToString:uuid]) {
                         correspondingWindowFound = YES;
                         break;
@@ -5584,9 +5367,15 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 #pragma mark -
 #pragma mark Tab view control and delegate methods
 
-//WARNING: Might be called from code in background threads
-- (void)viewStructure {
-
+/**
+ * Shared view-switching path used by viewStructure/Content/Query/Status/Relations/Triggers.
+ * Returns YES if the switch went through, NO if it was cancelled because the current
+ * view had uncommitted edits.
+ *
+ * WARNING: Safe to call from background threads — execution hops to the main queue.
+ */
+- (BOOL)switchToViewMode:(SAViewMode)mode {
+    __block BOOL didSwitch = NO;
     SPMainQSync(^{
         // Cancel the selection if currently editing a view and unable to save
         if (![self couldCommitCurrentViewActions]) {
@@ -5594,104 +5383,51 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             return;
         }
 
-        [self->tableTabView selectTabViewItemAtIndex:0];
-        [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableStructure];
+        [self->tableTabView selectTabViewItemAtIndex:[SAViewModeHelper tabIndexFor:mode]];
+        [self.mainToolbar setSelectedItemIdentifier:[SAViewModeHelper toolbarIdentifierFor:mode]];
         [self->spHistoryControllerInstance updateHistoryEntries];
-
-        [self->prefs setInteger:SPStructureViewMode forKey:SPLastViewMode];
-
+        [self->prefs setInteger:[SAViewModeHelper preferencesValueFor:mode] forKey:SPLastViewMode];
+        didSwitch = YES;
     });
+    return didSwitch;
+}
+
+//WARNING: Might be called from code in background threads
+- (void)viewStructure {
+    [self switchToViewMode:SAViewModeStructure];
 }
 
 - (void)viewContent {
-    SPMainQSync(^{
-        // Cancel the selection if currently editing a view and unable to save
-        if (![self couldCommitCurrentViewActions]) {
-            [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
-            return;
-        }
-
-        [self->tableTabView selectTabViewItemAtIndex:1];
-        [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableContent];
-        [self->spHistoryControllerInstance updateHistoryEntries];
-        [self->prefs setInteger:SPContentViewMode forKey:SPLastViewMode];
-    });
+    [self switchToViewMode:SAViewModeContent];
 }
 
 - (void)viewQuery {
+    if (![self switchToViewMode:SAViewModeQuery]) return;
+
     SPMainQSync(^{
-        // Cancel the selection if currently editing a view and unable to save
-        if (![self couldCommitCurrentViewActions]) {
-            [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
-            return;
-        }
-
-        [self->tableTabView selectTabViewItemAtIndex:2];
-        [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarCustomQuery];
-        [self->spHistoryControllerInstance updateHistoryEntries];
-
         // Set the focus on the text field
         [[self.parentWindowController window] makeFirstResponder:self->customQueryTextView];
-
-        [self->prefs setInteger:SPQueryEditorViewMode forKey:SPLastViewMode];
     });
-
 }
 
 - (void)viewStatus {
+    if (![self switchToViewMode:SAViewModeStatus]) return;
+
     SPMainQSync(^{
-        // Cancel the selection if currently editing a view and unable to save
-        if (![self couldCommitCurrentViewActions]) {
-            [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
-            return;
-        }
-
-        [self->tableTabView selectTabViewItemAtIndex:3];
-        [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableInfo];
-        [self->spHistoryControllerInstance updateHistoryEntries];
-
         if ([[self table] length]) {
             [self->extendedTableInfoInstance loadTable:[self table]];
         }
 
         [[self.parentWindowController window] makeFirstResponder:[self->extendedTableInfoInstance valueForKeyPath:@"tableCreateSyntaxTextView"]];
-
-        [self->prefs setInteger:SPTableInfoViewMode forKey:SPLastViewMode];
     });
-
 }
 
 - (void)viewRelations {
-    SPMainQSync(^{
-        // Cancel the selection if currently editing a view and unable to save
-        if (![self couldCommitCurrentViewActions]) {
-            [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
-            return;
-        }
-
-        [self->tableTabView selectTabViewItemAtIndex:4];
-        [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableRelations];
-        [self->spHistoryControllerInstance updateHistoryEntries];
-
-        [self->prefs setInteger:SPRelationsViewMode forKey:SPLastViewMode];
-    });
-
+    [self switchToViewMode:SAViewModeRelations];
 }
 
 - (void)viewTriggers {
-    SPMainQSync(^{
-        // Cancel the selection if currently editing a view and unable to save
-        if (![self couldCommitCurrentViewActions]) {
-            [self.mainToolbar setSelectedItemIdentifier:*SPViewModeToMainToolbarMap[[self->prefs integerForKey:SPLastViewMode]]];
-            return;
-        }
-
-        [self->tableTabView selectTabViewItemAtIndex:5];
-        [self.mainToolbar setSelectedItemIdentifier:SPMainToolbarTableTriggers];
-        [self->spHistoryControllerInstance updateHistoryEntries];
-
-        [self->prefs setInteger:SPTriggersViewMode forKey:SPLastViewMode];
-    });
+    [self switchToViewMode:SAViewModeTriggers];
 }
 
 /**
@@ -5809,6 +5545,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         // Update the selected table name and type
 
 
+        selectedTableName = nil;
         selectedTableType = SPTableTypeNone;
 
         // Clear the views
@@ -6058,7 +5795,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
                 BOOL correspondingWindowFound = NO;
                 NSString *uuid = [data objectAtIndex:2];
                 for(id win in [NSApp windows]) {
-                    if([[[[win delegate] class] description] isEqualToString:@"SPBundleHTMLOutputController"]) {
+                    if([[[[win delegate] class] description] isEqualToString:@"SABundleHTMLOutputWindowController"]) {
                         if([[[win delegate] windowUUID] isEqualToString:uuid]) {
                             correspondingWindowFound = YES;
                             break;
@@ -6117,7 +5854,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
  */
 - (NSString *)keychainPasswordForConnection:(SPMySQLConnection *)connection
 {
-    return [connectionController keychainPassword];
+    return [connectionController passwordForConnectionRequest];
 }
 
 /**
@@ -6171,7 +5908,7 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
         [NSApp endSheet:connectionErrorDialog];
         [connectionErrorDialog orderOut:nil];
 
-        queryStartDate = [[NSDate alloc] init];
+        [taskController resetQueryTimer];
 
         // If 'disconnect' was selected, trigger a window close.
         if (connectionErrorCode == SPMySQLConnectionLostDisconnect) {
@@ -6595,20 +6332,14 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
             [[NSNotificationCenter defaultCenter] removeObserver:self];
             [NSObject cancelPreviousPerformRequestsWithTarget:self];
 
-            [taskProgressWindow close];
+            // Close the task progress window and invalidate its timers.
+            [taskController shutDown];
 
             if (processListController) [processListController close];
 
             // #2924: The connection controller doesn't retain its delegate (us), but it may outlive us (e.g. when running a bg thread)
             [connectionController setDelegate:nil];
             [printWebView setFrameLoadDelegate:nil];
-
-            if (taskDrawTimer) {
-                [taskDrawTimer invalidate];
-            }
-            if (queryExecutionTimer) {
-                [queryExecutionTimer invalidate];
-            }
         }
     }
 }
@@ -6620,4 +6351,3 @@ static _Atomic int SPDatabaseDocumentInstanceCounter = 0;
 }
 
 @end
-

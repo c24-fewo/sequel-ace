@@ -31,3 +31,4 @@ vendor
 Package.resolved
 Sequel Ace Beta.app/**/*
 Sequel Ace.app/**/*
+.claude/

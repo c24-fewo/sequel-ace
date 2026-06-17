@@ -613,10 +613,10 @@
 "Changes have been made, which will be lost if this window is closed. Are you sure you want to continue" = "Sollen alle gemachten Änderungen durch Schließen des Fensters verworfen werden?";
 
 /* quitting app informal alert title */
-"Close the app?" = "Close the app?";
+"Close the app?" = "App schließen?";
 
 /* quitting app informal alert body */
-"Are you sure you want to quit the app?" = "Are you sure you want to quit the app?";
+"Are you sure you want to quit the app?" = "Möchten Sie die App wirklich beenden?";
 
 /* character set client: %@ */
 "character set client: %@" = "Zeichensatz des Client: % @";
@@ -970,7 +970,7 @@
 "Default: %@" = "Standard: %@";
 
 /* Query snippet default value placeholder */
-"default_value" = "default_value";
+"default_value" = "Standardwert";
 
 /* definer label (Navigator) */
 "Definer" = "Bezeichner: %@";
@@ -1096,7 +1096,7 @@
 "Dump of table" = "Tabellen-Dump";
 
 /* sql export dump of view label */
-"Dump of view" = "Dump of view";
+"Dump of view" = "Export der Ansicht";
 
 /* text showing that app is writing dump */
 "Dumping..." = "Dump läuft…";
@@ -1123,7 +1123,7 @@
 "Duplicate View..." = "Ansicht duplizieren";
 
 /* partial copy database support informative message */
-"Duplicating the database '%@' is only partially supported as it contains objects other than tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?" = "Das Duplizieren der Datenbank '%@' wird nur teilweise unterstützt, da sie andere Objekte als Tabellen enthält (z.B. Ansichten, Prozeduren, Funktionen, usw.), die nicht kopiert werden.\n\nMöchten Sie fortfahren?";
+"Duplicating the database '%@' is only partially supported as it contains objects other than tables (i.e. views, procedures, functions, etc.), which will not be copied.\n\nWould you like to continue?" = "Das Duplizieren der Datenbank '%@' wird nur teilweise unterstützt, da sie Objekte außer Tabellen (z. B. Views, Prozeduren, Funktionen usw.) enthält, die nicht kopiert werden.\n\nMöchten Sie fortfahren?";
 
 /* edit filter */
 "Edit Filters…" = "Filter bearbeiten…";
@@ -1324,6 +1324,12 @@
 
 /* execution stopped message */
 "Execution stopped!\n" = "Ausführung angehalten!\n";
+
+/* menu item to run EXPLAIN on the current query (issue #2291) */
+"Explain Current Query" = "Aktuelle Abfrage erklären";
+
+/* status text when the user runs EXPLAIN against a non-SELECT/WITH or multi-statement query */
+"EXPLAIN is only supported for a single SELECT or WITH statement." = "EXPLAIN wird nur für ein einzelnes SELECT- oder WITH-Statement unterstützt.";
 
 /* export selected favorites menu item */
 "Export Selected..." = "Ausgewählte exportieren …";
@@ -1649,7 +1655,7 @@ Befehle werden anwendungsweit ausgeführt";
 "items" = "Items";
 
 /* javascript exception */
-"JavaScript Exception" = "JavaScript Exception";
+"JavaScript Exception" = "JavaScript Ausnahme";
 
 /* javascript parsing error */
 "JavaScript Parsing Error" = "JavaScript Parse-Fehler";
@@ -1786,7 +1792,7 @@ Befehle werden anwendungsweit ausgeführt";
 "MySQL said:\n\n%@" = "MySQL Ergebnis:\n\n%@";
 
 /* Preferences : Themes : Initial filename for 'Export' */
-"MyTheme" = "MyTheme";
+"MyTheme" = "Mein Design";
 
 /* network preference pane name */
 "Network" = "Netzwerk";
@@ -2342,7 +2348,7 @@ Befehle werden anwendungsweit ausgeführt";
 "Sequel Ace could not find any columns belonging to this index. Maybe it has been removed already?" = "Sequel Ace findet keine Spalten zu diesem Index. Eventuell wurden sie bereits entfernt?";
 
 /* Preferences : Network : Custom SSH client : warning dialog message */
-"Sequel Ace only supports and is tested with the default OpenSSH client versions included with macOS. Using different clients might cause connection issues, security risks or not work at all.\n\nPlease be aware, that we cannot provide support for such configurations." = "Sequel Ace unterstützt und wird nur mit den standardmäßigen OpenSSH-Client-Versionen getestet, die in macOS enthalten sind. Die Verwendung unterschiedlicher Clients kann zu Verbindungsproblemen oder Sicherheitsrisiken führen oder gar nicht funktionieren.\n\nBitte beachten Sie, dass wir für solche Konfigurationen keinen Support leisten können.";
+"Sequel Ace only supports and is tested with the default OpenSSH client versions included with macOS. Using different clients might cause connection issues, security risks or not work at all.\n\nPlease be aware, that we cannot provide support for such configurations." = "Sequel Ace unterstützt und testet nur die standardmäßigen OpenSSH-Client-Versionen, die mit macOS ausgeliefert werden. Die Verwendung anderer Clients kann Verbindungsprobleme, Sicherheitsrisiken verursachen oder gar nicht funktionieren.\n\nBitte beachten Sie, dass wir für derartige Konfigurationen keinen Support anbieten können.";
 
 /* sequelace URL scheme command not supported. */
 "sequelace URL scheme command not supported." = "Sequelace URL Schema-Befehl wird nicht unterstützt.";
@@ -2356,7 +2362,7 @@ Befehle werden anwendungsweit ausgeführt";
 
 /* Add Database : Charset dropdown : default item ($1 = charset name)
  Add Database : Collation dropdown : default item ($1 = collation name) */
-"Server Default (%@)" = "Server Default (%@)";
+"Server Default (%@)" = "Server Standard (%@)";
 
 /* server processes window title (var = hostname) */
 "Server Processes on %@" = "Server Prozesse auf %@";
@@ -3210,13 +3216,13 @@ Befehle werden anwendungsweit ausgeführt";
 "The selected file is not a valid file.\n\nPlease try again.\n\nClass: %@" = "Die gewählte Datei ist ungültig.\n\nBitte erneut versuchen.\n\nKlasse: %@";
 
 /* known hosts not writable error message */
-"The selected known hosts file is not writable.\n\n%@\n\nPlease re-select the file in Sequel Ace's Preferences and try again." = "Die ausgewählte known_hosts-Datei ist nicht beschreibbar.\n\n%@\n\nBitte wählen Sie die Datei erneut in den Einstellungen von Sequel Ace aus und versuchen Sie es erneut.";
+"The selected known hosts file is not writable.\n\n%@\n\nPlease re-select the file in Sequel Ace's Preferences and try again." = "Die ausgewählte known_hosts-Datei ist nicht beschreibbar.\n\n%@\n\nBitte wählen Sie die Datei in den Einstellungen von Sequel Ace erneut aus und versuchen Sie es noch einmal.";
 
 /* known hosts is invalid message */
-"The selected known hosts file is invalid.\n\nPlease re-select the file in Sequel Ace's Preferences and try again." = "Die ausgewählte Known-Hosts-Datei ist ungültig.\n\nBitte wählen Sie die Datei in den Einstellungen von Sequel Ace erneut aus und versuchen Sie es erneut.";
+"The selected known hosts file is invalid.\n\nPlease re-select the file in Sequel Ace's Preferences and try again." = "Die ausgewählte known_hosts-Datei ist ungültig.\n\nBitte wählen Sie die Datei in den Einstellungen von Sequel Ace erneut aus und versuchen Sie es noch einmal.";
 
 /* known hosts contains quote message */
-"The selected known hosts file contains a quote (\") in its file path which is not supported.\n\n%@\n\nPlease select a different file in Sequel Ace's Preferences or rename the file/path to remove the quote." = "Die ausgewählte Datei bekannter Hosts enthält ein Anführungszeichen (\") im Dateipfad, das nicht unterstützt wird.\n\n%@\n\nBitte wählen Sie eine andere Datei in den Einstellungen von Sequel Ace aus oder benennen Sie die Datei/den Pfad um, um das Anführungszeichen zu entfernen.";
+"The selected known hosts file contains a quote (\") in its file path which is not supported.\n\n%@\n\nPlease select a different file in Sequel Ace's Preferences or rename the file/path to remove the quote." = "Die ausgewählte known_hosts-Datei enthält ein Anführungszeichen (\") im Dateipfad, das nicht unterstützt wird.\n\n%@\n\nBitte wählen Sie eine andere Datei in den Einstellungen von Sequel Ace oder benennen Sie die Datei/den Pfad um, um das Anführungszeichen zu entfernen.";
 
 /* SSH Tunnel Debugging menu and window title */
 "SSH Tunnel Debugging Info" = "SSH-Tunnel-Debugging-Informationen";
@@ -3336,7 +3342,7 @@ Befehle werden anwendungsweit ausgeführt";
 "The current field \"%@\" is a generated column and therefore cannot be edited." = "Das aktuelle Feld \"%@\" ist eine generierte Spalte und kann daher nicht bearbeitet werden.";
 
 /* Release note / info modal about change in latest release about column behavior */
-"The use of the \"default\" column has changed since the last version of Sequel ACE:\n\n- No default value : Leave it blank.\n- String value : Use single '' or double quotes \"\" if you want an empty string or to wrap a string\n- Expression : Use parentheses (). Except for the TIMESTAMP and DATETIME columns where you can specify the CURRENT_TIMESTAMP function without enclosing parentheses." = "Die Verwendung der \"default\" Spalte hat sich seit der letzten Version der Sequel ACE geändert:\n\n- Kein Standardwert: Lassen Sie sie leer.\n- String-Wert: Benutzen Sie einfache '' oder doppelte Anführungszeichen \"\", wenn Sie einen leeren String oder einen String\n- Ausdruck : Klammern verwenden (). Mit Ausnahme der Spalten TIMESTAMP und DATETIME können Sie die Funktion CURRENT_TIMESTAMP ohne Klammern angeben.";
+"The use of the \"default\" column has changed since the last version of Sequel ACE:\n\n- No default value : Leave it blank.\n- String value : Use single '' or double quotes \"\" if you want an empty string or to wrap a string\n- Expression : Use parentheses (). Except for the TIMESTAMP and DATETIME columns where you can specify the CURRENT_TIMESTAMP function without enclosing parentheses." = "Die Verwendung der \"default\"-Spalte hat sich seit der letzten Version von Sequel ACE geändert:\n\n- Kein Default-Wert: Freilassen.\n- String-Wert: Verwenden Sie einfache '' oder doppelte Anführungszeichen \"\" wenn Sie einen leeren String wünschen oder einen String umschließen möchten\n- Ausdruck: Verwenden Sie Klammern (). Ausgenommen bei TIMESTAMP- und DATETIME-Spalten, bei denen Sie die Funktion CURRENT_TIMESTAMP ohne umschließende Klammern angeben können.";
 
 /* Menu option to pin a view to the top of the list of tables */
 "Pin View" = "Ansicht anpinnen";
@@ -3345,7 +3351,7 @@ Befehle werden anwendungsweit ausgeführt";
 "Pin Table" = "Tabelle anpinnen";
 
 /* Menu option to pin a procedure to the top of the list of tables */
-"Pin Procedure" = "Pin Prozedur";
+"Pin Procedure" = "Prozedur anpinnen";
 
 /* Menu option to pin a function to the top of the list of tables */
 "Pin Function" = "Funktion anpinnen";
@@ -3369,7 +3375,97 @@ Befehle werden anwendungsweit ausgeführt";
 "Copy Table Name" = "Tabellennamen kopieren";
 
 /* sequelace URL scheme error: LaunchFavorite alert title (favorite name not found) */
-"LaunchFavorite URL Scheme Error" = "Fehler beim LaunchFavoriten URL-Schema";
+"LaunchFavorite URL Scheme Error" = "Fehler im LaunchFavorite-URL-Schema";
 
 /* sequelace URL scheme error: LaunchFavorite alert description (favorite name not found) */
-"The variable in the ?name= query parameter could not be matched with any of your favorites." = "Die Variable im Parameter ?name= stimmt mit keinem Ihrer Favoriten überein.";
+"The variable in the ?name= query parameter could not be matched with any of your favorites." = "Die Variable im ?name=-Abfrageparameter konnte keinem Ihrer Favoriten zugeordnet werden.";
+
+/* Vault connection: invalid host or port supplied */
+"Invalid Vault host or port." = "Ungültiger Vault-Host oder -Port.";
+
+/* Vault connection: HTTP error from Vault API (%d = HTTP status code) */
+"Vault returned HTTP %d." = "Vault hat HTTP %d zurückgegeben.";
+
+/* Vault connection: response body could not be parsed (%@ = detail) */
+"Vault response parse error: %@" = "Vault-Antwort konnte nicht geparst werden: %@";
+
+/* Vault OIDC login: user cancelled the browser flow */
+"Vault login was cancelled." = "Vault-Anmeldung wurde abgebrochen.";
+
+/* Vault OIDC login: could not open a local callback port */
+"Could not bind a local port for the Vault OIDC callback." = "Für den Vault-OIDC-Callback konnte kein lokaler Port gebunden werden.";
+
+/* Vault OIDC login: browser callback did not arrive within the timeout */
+"Vault OIDC login timed out. Please try again." = "Vault-OIDC-Anmeldung ist abgelaufen. Bitte erneut versuchen.";
+
+/* Vault OIDC login: callback query string was malformed (%@ = detail) */
+"Unexpected Vault OIDC callback: %@" = "Unerwarteter Vault-OIDC-Callback: %@";
+
+/* Vault auth manager: Vault host or credentials path not configured */
+"Vault host or credentials path is missing." = "Vault-Host oder Pfad zu den Zugangsdaten fehlt.";
+
+/* Vault auth manager: OIDC login flow failed */
+"Vault OIDC login failed." = "Vault-OIDC-Anmeldung fehlgeschlagen.";
+
+/* Vault auth manager: credentials endpoint returned an error */
+"Failed to generate credentials from Vault." = "Zugangsdaten konnten nicht aus Vault erzeugt werden.";
+
+/* Vault auth manager: credentials endpoint returned empty username/password */
+"Vault returned empty credentials." = "Vault hat leere Zugangsdaten zurückgegeben.";
+
+/* Vault connect-time validation: Vault host field is empty */
+"A Vault host is required to connect." = "Zum Verbinden ist ein Vault-Host erforderlich.";
+
+/* Vault connect-time validation: credentials path field is empty */
+"A Vault credentials path is required to connect." = "Zum Verbinden ist ein Vault-Pfad für Zugangsdaten erforderlich.";
+
+/* Vault connect-time validation: DB host field is empty */
+"A database host is required to connect." = "Zum Verbinden ist ein Datenbank-Host erforderlich.";
+
+/* Vault connection: error sheet title when credential generation fails */
+"Vault Authentication Failed" = "Vault-Authentifizierung fehlgeschlagen";
+
+/* Vault save-favorite validation: DB host field is empty */
+"Please provide a database host to save a Vault favorite." = "Bitte geben Sie einen Datenbank-Host an, um einen Vault-Favoriten zu speichern.";
+
+/* Vault save-favorite validation: Vault host field is empty */
+"A Vault host is required to save a Vault favorite." = "Zum Speichern eines Vault-Favoriten ist ein Vault-Host erforderlich.";
+
+/* Vault save-favorite validation: credentials path field is empty */
+"A Vault credentials path is required to save a Vault favorite." = "Zum Speichern eines Vault-Favoriten ist ein Vault-Pfad für Zugangsdaten erforderlich.";
+
+/* Cell context menu filter submenu title */
+"Filter by Selected Value" = "Nach ausgewähltem Wert filtern";
+
+/* AWS console sign-in (aws login) error: profile is missing login_session configuration */
+"The profile is not configured for AWS console sign-in" = "The profile is not configured for AWS console sign-in";
+
+/* AWS console sign-in (aws login) error: no cached session on disk */
+"No cached AWS console sign-in session was found. Run `aws login` and try again." = "No cached AWS console sign-in session was found. Run `aws login` and try again.";
+
+/* AWS console sign-in (aws login) error: cached credentials have expired */
+"The cached AWS console sign-in credentials have expired. They refresh about every 15 minutes. Run `aws login` and reconnect." = "The cached AWS console sign-in credentials have expired. They refresh about every 15 minutes. Run `aws login` and reconnect.";
+
+/* AWS console sign-in (aws login) error: cached session file could not be parsed */
+"The cached AWS console sign-in session could not be read" = "The cached AWS console sign-in session could not be read";
+
+/* AWS IAM Identity Center (aws sso login) error: profile is missing SSO configuration */
+"The profile is not configured for AWS IAM Identity Center" = "The profile is not configured for AWS IAM Identity Center";
+
+/* AWS IAM Identity Center (aws sso login) error: no cached token on disk */
+"No cached AWS SSO session was found. Run `aws sso login` and try again." = "No cached AWS SSO session was found. Run `aws sso login` and try again.";
+
+/* AWS IAM Identity Center (aws sso login) error: cached token has expired */
+"The cached AWS SSO token has expired. Run `aws sso login` and reconnect." = "The cached AWS SSO token has expired. Run `aws sso login` and reconnect.";
+
+/* AWS IAM Identity Center (aws sso login) error: network request failed */
+"Network request to AWS IAM Identity Center failed" = "Network request to AWS IAM Identity Center failed";
+
+/* AWS IAM Identity Center (aws sso login) error: response could not be parsed */
+"Invalid response from AWS IAM Identity Center" = "Invalid response from AWS IAM Identity Center";
+
+/* AWS IAM Identity Center (aws sso login) error: portal denied the request */
+"Access denied by AWS IAM Identity Center" = "Access denied by AWS IAM Identity Center";
+
+/* AWS IAM Identity Center (aws sso login) error: portal request timed out */
+"AWS IAM Identity Center request timed out" = "AWS IAM Identity Center request timed out";

@@ -67,16 +67,17 @@ static unsigned short getRandomPort(void);
  */
 - (instancetype)initToHost:(NSString *)theHost port:(NSInteger)thePort login:(NSString *)theLogin tunnellingToPort:(NSInteger)targetPort onHost:(NSString *)targetHost
 {
-	if (!theHost || !targetPort || !targetHost) return nil;
+	if (!theHost) return nil;
 
 	if ((self = [super init])) {
+		NSString *safeTargetHost = targetHost ?: @"127.0.0.1";
 		
 		// Store the connection settings as appropriate
 		sshHost = [[NSString alloc] initWithString:theHost];
 		sshLogin = [[NSString alloc] initWithString:(theLogin?theLogin:@"")];
 		sshPort = thePort;
-		useHostFallback = [theHost isEqualToString:targetHost];
-		remoteHost = [[NSString alloc] initWithString:targetHost];
+		useHostFallback = [theHost isEqualToString:safeTargetHost];
+		remoteHost = [safeTargetHost copy];
 		remotePort = targetPort;
 		delegate = nil;
 		stateChangeSelector = nil;
@@ -175,6 +176,11 @@ static unsigned short getRandomPort(void);
 	if (![[NSFileManager defaultManager] fileExistsAtPath:expandedPath]) return NO;
 	identityFilePath = [[NSString alloc] initWithString:expandedPath];
 	return YES;
+}
+
+- (void)setRemoteSocketPath:(NSString *)thePath
+{
+	remoteSocketPath = [thePath copy];
 }
 
 /*
@@ -492,7 +498,10 @@ static unsigned short getRandomPort(void);
 		else {
 			[taskArguments addObject:sshHost];
 		}
-		if (useHostFallback) {
+		if ([remoteSocketPath length]) {
+			TA(@"-L", ([NSString stringWithFormat:@"%ld:%@", (long)localPort, remoteSocketPath]));
+		}
+		else if (useHostFallback) {
 			TA(@"-L",([NSString stringWithFormat:@"%ld:127.0.0.1:%ld", (long)localPort, (long)remotePort]));
 			TA(@"-L",([NSString stringWithFormat:@"%ld:%@:%ld", (long)localPortFallback, remoteHost, (long)remotePort]));
 		}
@@ -505,6 +514,9 @@ static unsigned short getRandomPort(void);
 		// Set up the environment for the task
 		authenticationAppPath = [[NSBundle mainBundle] pathForAuxiliaryExecutable:@"SequelAceTunnelAssistant"];
 		taskEnvironment = [[NSMutableDictionary alloc] initWithDictionary:[[NSProcessInfo processInfo] environment]];
+
+		// use default shell so ProxyJump commands run by ssh stay inside the sandbox
+		[taskEnvironment removeObjectForKey:@"SHELL"];
 
 		[taskEnvironment safeSetObject:authenticationAppPath forKey:@"SSH_ASKPASS"];
 		[taskEnvironment safeSetObject:@":0" forKey:@"DISPLAY"];
@@ -783,7 +795,7 @@ static unsigned short getRandomPort(void);
 	[self performSelectorOnMainThread:@selector(workerGetResponseForQuestion:) withObject:theQuestion waitUntilDone:YES];
 
 	// Wait for closeSSHQuestionSheet: to unlock the lock, indicating an answer is available
-	while (![answerAvailableLock tryLock]) usleep(25000);
+	[answerAvailableLock lock];
 
 	// Save the answer
 	BOOL response = requestedResponse;
@@ -809,6 +821,7 @@ static unsigned short getRandomPort(void);
 
 	//show the question window
 	[parentWindow beginSheet:sshQuestionDialog completionHandler:nil];
+	[[NSApplication sharedApplication] runModalForWindow:sshQuestionDialog];
 }
 
 /*
@@ -819,6 +832,7 @@ static unsigned short getRandomPort(void);
 	requestedResponse = [sender tag] == 1 ? YES : NO;
 	[NSApp endSheet:sshQuestionDialog];
 	[sshQuestionDialog orderOut:nil];
+	[[NSApplication sharedApplication] abortModal];
 	[[answerAvailableLock onMainThread] unlock];
 }
 
@@ -839,7 +853,7 @@ static unsigned short getRandomPort(void);
 	[self performSelectorOnMainThread:@selector(workerGetPasswordForQuery:) withObject:theQuery waitUntilDone:YES];
 
 	// Wait for closeSSHPasswordSheet: to unlock the lock, indicating an answer is available
-	while (![answerAvailableLock tryLock]) usleep(25000);
+	[answerAvailableLock lock];
 
 	// Save the answer
 	NSString *thePassword = nil;
@@ -971,4 +985,3 @@ unsigned short getRandomPort() {
 	}
 	return port;
 }
-

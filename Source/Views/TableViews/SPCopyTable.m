@@ -38,7 +38,6 @@
 #import "SPDataStorage.h"
 #import "SPTextAndLinkCell.h"
 #import "SPTooltip.h"
-#import "SPBundleHTMLOutputController.h"
 #import "SPGeometryDataView.h"
 #import "SPBundleEditorController.h"
 #import "SPAppController.h"
@@ -54,7 +53,6 @@
 #include <stdlib.h>
 
 #import "sequel-ace-Swift.h"
-@import AppCenterAnalytics;
 
 NSInteger SPEditMenuCopy               = 2001;
 NSInteger SPEditMenuCopyWithColumns    = 2002;
@@ -65,6 +63,7 @@ static const NSInteger kBlobExclude     = 1;
 static const NSInteger kBlobInclude     = 2;
 static const NSInteger kBlobAsFile      = 3;
 static const NSInteger kBlobAsImageFile = 4;
+static const NSInteger SACellFilterMenuTag = 1945001;
 
 NSString *kColType    = @"TYPE";
 NSString *kColMapping = @"MAPPING";
@@ -80,6 +79,76 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
  */
 @synthesize fieldEditorSelectedRange;
 @synthesize tmpBlobFileDirectory;
+
+- (void)_removeCellFilterMenuItemFromMenu:(NSMenu *)menu
+{
+	NSMenuItem *item = [menu itemWithTag:SACellFilterMenuTag];
+	if(!item) return;
+
+	NSInteger index = [menu indexOfItem:item];
+	if(index > 0 && [[menu itemAtIndex:index - 1] isSeparatorItem]) {
+		[menu removeItemAtIndex:index - 1];
+		index--;
+	}
+
+	[menu removeItem:item];
+}
+
+- (NSInteger)_storageColumnIndexForVisibleColumn:(NSInteger)visibleColumn
+{
+	if(visibleColumn < 0 || visibleColumn >= (NSInteger)[[self tableColumns] count]) return NSNotFound;
+
+	NSTableColumn *tableColumn = [[self tableColumns] objectAtIndex:visibleColumn];
+	NSNumber *storageColumn = [SACellFilterColumnIdentifier storageIndexFromIdentifier:[tableColumn identifier]];
+	return storageColumn ? [storageColumn integerValue] : NSNotFound;
+}
+
+- (void)_appendCellFilterMenuToMenu:(NSMenu *)menu forEvent:(NSEvent *)event
+{
+	if(![[self delegate] isKindOfClass:[SPTableContent class]]) return;
+
+	NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+	NSInteger row = [self rowAtPoint:point];
+	NSInteger visibleColumn = [self columnAtPoint:point];
+	if(row < 0 || visibleColumn < 0) return;
+
+	NSInteger storageColumn = [self _storageColumnIndexForVisibleColumn:visibleColumn];
+	if(storageColumn == NSNotFound) return;
+
+	NSArray *columnDefinitions = [(id <SPDatabaseContentViewDelegate>)[self delegate] dataColumnDefinitions];
+	if(storageColumn < 0 || storageColumn >= (NSInteger)[columnDefinitions count]) return;
+
+	NSDictionary *columnDefinition = [columnDefinitions objectAtIndex:storageColumn];
+	NSString *columnName = [columnDefinition objectForKey:@"name"];
+	NSString *typeGrouping = [columnDefinition objectForKey:@"typegrouping"];
+	NSArray<SACellFilterMenuItemDescriptor *> *descriptors = [SACellFilterMenuBuilder menuItemDescriptorsWithColumnName:columnName
+		typeGrouping:typeGrouping
+		value:[self displayStringForRow:row column:visibleColumn]
+		isNull:[self isNullAtRow:row column:visibleColumn]];
+
+	if(![descriptors count]) return;
+
+	NSMenu *filterMenu = [[NSMenu alloc] init];
+	SPTableContent *tableContent = (SPTableContent *)[self delegate];
+	for(SACellFilterMenuItemDescriptor *descriptor in descriptors) {
+		SACellFilterAction *action = [[SACellFilterAction alloc] initWithTableContent:tableContent
+			columnName:[descriptor columnName]
+			operatorName:[descriptor operatorName]
+			values:[descriptor values]
+			isNull:[descriptor isNull]];
+		NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:[descriptor title] action:@selector(apply:) keyEquivalent:@""];
+		[item setTarget:action];
+		[item setRepresentedObject:action];
+		[filterMenu addItem:item];
+	}
+
+	[menu addItem:[NSMenuItem separatorItem]];
+
+	NSMenuItem *filterMenuItem = [[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Filter by Selected Value", @"Cell context menu filter submenu title") action:nil keyEquivalent:@""];
+	[filterMenuItem setTag:SACellFilterMenuTag];
+	[menu addItem:filterMenuItem];
+	[menu setSubmenu:filterMenu forItem:filterMenuItem];
+}
 
 /**
  * Cell editing in SPCustomQuery or for views in SPTableContent
@@ -521,8 +590,8 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
             data[kHeader]     = [[[[columns safeObjectAtIndex:c] headerCell] stringValue] componentsSeparatedByString:[NSString columnHeaderSplittingSpace]][0];
             data[kFieldType]  = t;
             data[kFieldTypeGroup] = tGroup;
-            // Numeric data
-            if ([tGroup isEqualToString:@"bit"] || [tGroup isEqualToString:@"integer"] || [tGroup isEqualToString:@"float"])
+            // Numeric types should not be wrapped in quotes in INSERT statements.
+            if ([SPFieldTypeClassifier shouldBeUnquotedWithFieldTypeGroup:tGroup fieldType:t])
                 data[kColType] = @(0);
             // Blob data or long text data
             else if ([tGroup isEqualToString:@"blobdata"] || [tGroup isEqualToString:@"textdata"])
@@ -540,13 +609,6 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
 
     if(errorDict.count > 0){
         SPLog(@"autoIncrement error");
-        @try {
-            if ([prefs boolForKey:SPSaveApplicationUsageAnalytics]) {
-                [MSACAnalytics trackEvent:@"error" withProperties:errorDict];
-            }
-        } @catch (NSException * e) {
-            SPLog(@"MSACAppCenter Exception on trackEvent Report: %@", e);
-        }
     }
 
     // --- SECOND PART --- Build the SQL with the previous selected columns
@@ -777,6 +839,91 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
 	return result;
 }
 
+/**
+ * Return the display string for a single cell, matching the NULL / blob /
+ * geometry formatting used by -draggedRowsAsTabString. Used to write the
+ * clicked cell's value onto the pasteboard during a drag, so drops onto
+ * the rule-filter input populate only that cell's value.
+ */
+- (NSString *)displayStringForRow:(NSInteger)row column:(NSInteger)visibleColumn
+{
+	NSArray *columns = [self tableColumns];
+	NSInteger numColumns = (NSInteger)[columns count];
+	if (row < 0 || visibleColumn < 0 || visibleColumn >= numColumns) {
+		return nil;
+	}
+
+	// Row / column indices get passed in from hit-tests and cached
+	// mouseDown positions, either of which can outlive a reload. Guard
+	// against both a stale row and a reordered column identifier that
+	// resolves outside the storage's column range before calling into
+	// SPDataStorageObjectAtRowAndColumn (which does not bounds-check).
+	if (!tableStorage || (NSUInteger)row >= [tableStorage count]) {
+		return nil;
+	}
+
+	NSUInteger storageIndex = (NSUInteger)[[[columns safeObjectAtIndex:(NSUInteger)visibleColumn] identifier] integerValue];
+	if (storageIndex >= [tableStorage columnCount]) {
+		return nil;
+	}
+
+	id cellData = SPDataStorageObjectAtRowAndColumn(tableStorage, (NSUInteger)row, storageIndex);
+
+	if (!cellData) {
+		return nil;
+	}
+
+	NSString *nullString = [prefs objectForKey:SPNullValue];
+	BOOL hexBlobs = [prefs boolForKey:SPDisplayBinaryDataAsHex];
+
+	if ([cellData isNSNull]) {
+		return nullString;
+	}
+	if ([cellData isSPNotLoaded]) {
+		return NSLocalizedString(@"(not loaded)", @"value shown for hidden blob and text fields");
+	}
+	// Honour any SABaseFormatter attached to the column's data cell (e.g.
+	// SAUuidFormatter) so the dropped value matches what the grid shows
+	// – same precedence used by -rowsAsTabStringWithHeaders... before the
+	// raw NSData path.
+	NSFormatter *cellFormatter = [[[columns safeObjectAtIndex:(NSUInteger)visibleColumn] dataCell] formatter];
+	if ([cellFormatter isKindOfClass:[SABaseFormatter class]]) {
+		NSString *formatted = [(SABaseFormatter *)cellFormatter stringForObjectValue:cellData];
+		if (formatted) {
+			return formatted;
+		}
+	}
+	if ([cellData isKindOfClass:[NSData class]]) {
+		if (hexBlobs) {
+			return [NSString stringWithFormat:@"0x%@", [cellData dataToHexString]];
+		}
+		NSStringEncoding connectionEncoding = [mySQLConnection stringEncoding];
+		NSString *displayString = [[NSString alloc] initWithData:cellData encoding:connectionEncoding];
+		if (!displayString) {
+			displayString = [[NSString alloc] initWithData:cellData encoding:NSISOLatin1StringEncoding];
+		}
+		return displayString;
+	}
+	if ([cellData isKindOfClass:[SPMySQLGeometryData class]]) {
+		return [cellData wktString];
+	}
+	return [cellData description];
+}
+
+- (BOOL)isNullAtRow:(NSInteger)row column:(NSInteger)visibleColumn
+{
+	NSArray *columns = [self tableColumns];
+	NSInteger numColumns = (NSInteger)[columns count];
+	if (row < 0 || visibleColumn < 0 || visibleColumn >= numColumns) return NO;
+	if (!tableStorage || (NSUInteger)row >= [tableStorage count]) return NO;
+
+	NSUInteger storageIndex = (NSUInteger)[[[columns safeObjectAtIndex:(NSUInteger)visibleColumn] identifier] integerValue];
+	if (storageIndex >= [tableStorage columnCount]) return NO;
+
+	id cellData = SPDataStorageObjectAtRowAndColumn(tableStorage, (NSUInteger)row, storageIndex);
+	return (cellData != nil) && [cellData isNSNull];
+}
+
 #pragma mark -
 
 /**
@@ -976,6 +1123,7 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
 	NSMenu *menu = [self menu];
 
 	if(![[self delegate] isKindOfClass:[SPCustomQuery class]] && ![[self delegate] isKindOfClass:[SPTableContent class]]) return menu;
+	[self _removeCellFilterMenuItemFromMenu:menu];
 
 	[SPBundleManager.shared reloadBundles:self];
 
@@ -1038,6 +1186,8 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
 			}
 		}
 	}
+
+	[self _appendCellFilterMenuToMenu:menu forEvent:event];
 
 	return menu;
 
@@ -1584,11 +1734,11 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
     }
 
     else if([action isEqualToString:SPBundleOutputActionShowAsHTML]) {
-        Class htmlWindow = [SPBundleHTMLOutputController class];
+        Class htmlWindow = [SABundleHTMLOutputWindowController class];
         NSString *cmdUUID = [cmdData objectForKey:SPBundleFileUUIDKey];
         for (NSWindow *win in [NSApp windows]) {
             if ([win.delegate isKindOfClass:htmlWindow]) {
-                SPBundleHTMLOutputController *htmlDelegate = (SPBundleHTMLOutputController *)win.delegate;
+                SABundleHTMLOutputWindowController *htmlDelegate = (SABundleHTMLOutputWindowController *)win.delegate;
                 if ([htmlDelegate.windowUUID isEqualToString:cmdUUID]) {
                     [htmlDelegate displayHTMLContent:output withOptions:nil];
                     return;
@@ -1596,7 +1746,7 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
             }
         }
         
-        SPBundleHTMLOutputController *bundleController = [[SPBundleHTMLOutputController alloc] init];
+        SABundleHTMLOutputWindowController *bundleController = [[SABundleHTMLOutputWindowController alloc] init];
         [bundleController setWindowUUID:cmdUUID];
         [bundleController displayHTMLContent:output withOptions:nil];
         [SPBundleManager.shared addHTMLOutputController:bundleController];
@@ -1609,8 +1759,30 @@ NSString *kFieldTypeGroup = @"FIELDGROUP";
 {
 	columnDefinitions = nil;
 	prefs = [NSUserDefaults standardUserDefaults];
+	mouseDownRow = -1;
+	mouseDownColumn = -1;
 
     [super awakeFromNib];
+}
+
+@synthesize mouseDownRow;
+@synthesize mouseDownColumn;
+
+/**
+ * Cache the row/column under the pointer at the moment the mouse goes
+ * down. -clickedRow / -clickedColumn are only valid during NSControl
+ * action dispatch and NSApp.currentEvent during a drag-source callback
+ * is the mouseDragged event that crossed the drag threshold (not the
+ * original mouseDown), so we record the click location here and read it
+ * back in -[SPTableContent tableView:writeRowsWithIndexes:toPasteboard:]
+ * when publishing the single-cell pasteboard payload.
+ */
+- (void)mouseDown:(NSEvent *)event
+{
+	NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+	mouseDownRow = [self rowAtPoint:point];
+	mouseDownColumn = [self columnAtPoint:point];
+	[super mouseDown:event];
 }
 
 @end

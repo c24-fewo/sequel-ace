@@ -30,6 +30,7 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPCustomQuery.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "SPSQLParser.h"
 #import "SPDataCellFormatter.h"
 #import "SPDatabaseDocument.h"
@@ -51,7 +52,6 @@
 #import "SPThreadAdditions.h"
 #import "SPConstants.h"
 #import "SPAppController.h"
-#import "SPBundleHTMLOutputController.h"
 #import "SPFunctions.h"
 #import "SPHelpViewerClient.h"
 #import "SPHelpViewerController.h"
@@ -102,6 +102,8 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 @interface SPCustomQuery ()
 
 - (id)_resultDataItemAtRow:(NSInteger)row columnIndex:(NSUInteger)column preserveNULLs:(BOOL)preserveNULLs asPreview:(BOOL)asPreview;
+- (void)_updateColumnHeadersForCurrentPreference;
++ (NSAttributedString *)columnHeaderAttributedStringForColumnDefinition:(NSDictionary *)columnDefinition showColumnTypes:(BOOL)showColumnTypes;
 - (void)documentWillClose:(NSNotification *)notification;
 - (void)queryFavoritesHaveBeenUpdated:(NSNotification *)notification;
 - (void)historyItemsHaveBeenUpdated:(NSNotification *)notification;
@@ -117,6 +119,27 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 @synthesize textViewWasChanged;
 @synthesize bracketHighlighter;
 @synthesize sortCount;
+
+// Map new @property declarations (exposed for Swift extensions) to the existing
+// ivars instead of letting clang autosynthesize fresh `_name` ivars that xib
+// outlets wouldn't reach.
+@synthesize tableDocumentInstance = tableDocumentInstance;
+@synthesize textView = textView;
+@synthesize currentQueryRange = currentQueryRange;
+@synthesize sortColumn = sortColumn;
+@synthesize isDesc = isDesc;
+@synthesize reloadingExistingResult = reloadingExistingResult;
+@synthesize errorTextTitle = errorTextTitle;
+@synthesize errorText = errorText;
+
++ (NSAttributedString *)columnHeaderAttributedStringForColumnDefinition:(NSDictionary *)columnDefinition showColumnTypes:(BOOL)showColumnTypes
+{
+    if (![columnDefinition isKindOfClass:[NSDictionary class]]) {
+        return [[NSAttributedString alloc] initWithString:@""];
+    }
+    
+    return [columnDefinition tableContentColumnHeaderAttributedStringWithColumnTypesVisible:showColumnTypes];
+}
 
 #pragma mark IBAction methods
 
@@ -195,7 +218,7 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
     
     reloadingExistingResult = NO;
     [self clearResultViewDetailsToRestore];
-    
+
     [self performQueries:queries withCallback:NULL];
 }
 
@@ -245,7 +268,7 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
     
     reloadingExistingResult = NO;
     [self clearResultViewDetailsToRestore];
-    
+
     [self performQueries:queries withCallback:NULL];
 }
 
@@ -543,7 +566,7 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 {
     NSSavePanel *panel = [NSSavePanel savePanel];
     
-    [panel setAllowedFileTypes:@[SPFileExtensionSQL]];
+    [panel setAllowedContentTypes:@[[UTType typeWithFilenameExtension:SPFileExtensionSQL]]];
     
     [panel setExtensionHidden:NO];
     [panel setAllowsOtherFileTypes:YES];
@@ -646,16 +669,15 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 
 /**
  *  Method that checks if an array of SQL queries contain any destructive SQL
- * Basically, defaults to YES, unless all of the queries start with SHOW or SELECT
+ * Basically, defaults to YES, unless all queries are safe to run without the
+ * destructive SQL confirmation.
  *
  *  @param queries   NSArray - Array of SQL queries
  *
  *  @return BOOL YES if any of the queries contain destructive SQL
  */
 -(BOOL)queriesContainDestructiveSQL:(NSArray *)queries{
-    
-    NSArray *safeCommands = @[@"SHOW", @"SELECT"];
-    
+
     BOOL __block retCode = YES;
     
     [queries enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop){
@@ -664,24 +686,14 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
         
         if([obj isKindOfClass:[NSString class]] && [(NSString *)obj length]){
             
-            NSMutableString *query = [obj mutableCopy];
-            
-            // remove comments
-            [query replaceOccurrencesOfRegex:@"--.*?\n" withString:@""];
-            [query replaceOccurrencesOfRegex:@"--.*?$" withString:@""];
-            [query replaceOccurrencesOfRegex:@"/\\*(.|\n)*?\\*/" withString:@""];
-            
             // trim leading and trailing spaces and new lines
-            [query setString:[query trimWhitespacesAndNewlines]];
+            NSString *query = [(NSString *)obj trimWhitespacesAndNewlines];
             
             SPLog(@"query: [%@]", query);
             
-            for (NSString *safeCommand in safeCommands){
-                if([query hasPrefixWithPrefix:safeCommand caseSensitive:NO] == YES){
-                    SPLog(@"Safe command: [%@], breaking", safeCommand);
-                    retCode = NO;
-                    break;
-                }
+            if ([SPCustomQuery isQuerySafeWithoutDestructiveWarning:query] == YES) {
+                SPLog(@"Query is safe to run without destructive warning");
+                retCode = NO;
             }
             
         } // End isKindOfClass
@@ -1876,6 +1888,7 @@ static NSString * const SPDashStyleCommentMarker = @"-- ";
 {
     NSArray *theColumns;
     NSTableColumn *theCol;
+    BOOL showColumnTypes = [prefs boolForKey:SPDisplayTableViewColumnTypes];
     
     // Remove all existing columns from the table
     theColumns = [customQueryView tableColumns];
@@ -1923,11 +1936,7 @@ static NSString * const SPDashStyleCommentMarker = @"-- ";
         // Set field type for validations
         [[dataCell formatter] setFieldType:[columnDefinition objectForKey:@"type"]];
         [theCol setDataCell:dataCell];
-        if ([prefs boolForKey:SPDisplayTableViewColumnTypes]) {
-            [[theCol headerCell] setAttributedStringValue:[columnDefinition tableContentColumnHeaderAttributedString]];
-        } else {
-            [[theCol headerCell] setStringValue:[columnDefinition objectForKey:@"name"]];
-        }
+        [[theCol headerCell] setAttributedStringValue:[SPCustomQuery columnHeaderAttributedStringForColumnDefinition:columnDefinition showColumnTypes:showColumnTypes]];
         [theCol setHeaderToolTip:[NSString stringWithFormat:@"%@ – %@%@", [columnDefinition objectForKey:@"name"], [columnDefinition objectForKey:@"type"], ([columnDefinition objectForKey:@"char_length"]) ? [NSString stringWithFormat:@"(%@)", [columnDefinition objectForKey:@"char_length"]] : @""]];
         
         // Set the width of this column to saved value if exists and maps to a real column
@@ -1940,6 +1949,20 @@ static NSString * const SPDashStyleCommentMarker = @"-- ";
         
         [customQueryView addTableColumn:theCol];
     }
+}
+
+- (void)_updateColumnHeadersForCurrentPreference
+{
+    BOOL showColumnTypes = [prefs boolForKey:SPDisplayTableViewColumnTypes];
+    
+    for (NSTableColumn *column in [customQueryView tableColumns]) {
+        NSDictionary *columnDefinition = [cqColumnDefinition safeObjectAtIndex:[[column identifier] integerValue]];
+        if (!columnDefinition) continue;
+        
+        [[column headerCell] setAttributedStringValue:[SPCustomQuery columnHeaderAttributedStringForColumnDefinition:columnDefinition showColumnTypes:showColumnTypes]];
+    }
+    
+    [customQueryView.headerView setNeedsDisplay:YES];
 }
 
 /**
@@ -2845,7 +2868,7 @@ static NSString * const SPDashStyleCommentMarker = @"-- ";
             BOOL correspondingWindowFound = NO;
             NSString *uuid = [data objectAtIndex:2];
             for (id win in [NSApp windows]) {
-                if ([[[[win delegate] class] description] isEqualToString:@"SPBundleHTMLOutputController"]) {
+                if ([[[[win delegate] class] description] isEqualToString:@"SABundleHTMLOutputWindowController"]) {
                     if ([[[win delegate] windowUUID] isEqualToString:uuid]) {
                         correspondingWindowFound = YES;
                         break;
@@ -3347,29 +3370,21 @@ static NSString * const SPDashStyleCommentMarker = @"-- ";
     // Result Table Font preference changed
     else if ([keyPath isEqualToString:SPGlobalFontSettings]) {
         NSFont *tableFont = [NSUserDefaults getFont];
-        NSFont *headerFont = [[NSFontManager sharedFontManager] convertFont:tableFont toSize:MAX(tableFont.pointSize * 0.75, 11.0)];
         [customQueryView setRowHeight:4.0f + NSSizeToCGSize([@"{ǞṶḹÜ∑zgyf" sizeWithAttributes:@{NSFontAttributeName : tableFont}]).height];
         [customQueryView setFont:tableFont];
 
-        // Update header cells
-        for (NSTableColumn *column in [customQueryView tableColumns]) {
-            if ([prefs boolForKey:SPDisplayTableViewColumnTypes]) {
-                NSAttributedString *attrString = [[cqColumnDefinition safeObjectAtIndex:[[column identifier] integerValue]] tableContentColumnHeaderAttributedString];
-
-                [[column headerCell] setAttributedStringValue:attrString];
-            } else {
-                [[column headerCell] setFont:headerFont];
-            }
-        }
-
-        // Force header view to redraw
-        [customQueryView.headerView setNeedsDisplay:YES];
+        [self _updateColumnHeadersForCurrentPreference];
 
         [customQueryView reloadData];
     } else if ([keyPath isEqualToString:SPCustomQueryEnableBracketHighlighting]) {
         self.bracketHighlighter.enabled = [[change valueForKey:NSKeyValueChangeNewKey] boolValue];
     } else if ([keyPath isEqualToString:SPDisplayTableViewColumnTypes]) {
-        [self updateTableView];
+        if ([customQueryView numberOfColumns] != [cqColumnDefinition count]) {
+            [self updateTableView];
+        } else {
+            [self _updateColumnHeadersForCurrentPreference];
+            [customQueryView reloadData];
+        }
     }
 }
 
@@ -3411,7 +3426,11 @@ static NSString * const SPDashStyleCommentMarker = @"-- ";
     else if ( [menuItem tag] >= SP_HISTORY_COPY_MENUITEM_TAG && [menuItem tag] <= SP_HISTORY_CLEAR_MENUITEM_TAG ) {
         return ([queryHistoryButton numberOfItems]-7);
     }
-    
+    else if ([menuItem action] == @selector(runExplainQueryAction:)) {
+        if ([tableDocumentInstance isWorking]) return NO;
+        return ([[textView string] length] > 0);
+    }
+
     return YES;
 }
 
@@ -3688,6 +3707,9 @@ static NSString * const SPDashStyleCommentMarker = @"-- ";
     [queryInfoPaneSplitView setCollapsibleSubviewIndex:1];
     [queryInfoPaneSplitView setCollapsibleSubviewCollapsed:YES animate:NO];
     
+    // Give the editor a small vertical inset so text is not flush against the top and bottom edges (#2236)
+    [textView setTextContainerInset:NSMakeSize(0.0f, 2.0f)];
+
     // Set the structure and index view's vertical gridlines if required
     [customQueryView setGridStyleMask:([prefs boolForKey:SPDisplayTableViewVerticalGridlines]) ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
     
@@ -3796,6 +3818,7 @@ static NSString * const SPDashStyleCommentMarker = @"-- ";
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [prefs removeObserver:self forKeyPath:SPGlobalFontSettings];
     [prefs removeObserver:self forKeyPath:SPCustomQueryEnableBracketHighlighting];
+    [prefs removeObserver:self forKeyPath:SPDisplayTableViewColumnTypes];
     [NSObject cancelPreviousPerformRequestsWithTarget:customQueryView];
     
     [self clearQueryLoadTimer];
